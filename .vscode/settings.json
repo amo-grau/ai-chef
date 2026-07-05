@@ -4,6 +4,8 @@
         "/home/oscar/isaacsim/kit/python/lib/python3.12/site-packages",
         "/home/oscar/isaacsim/kit/kernel/py",
         "/home/oscar/isaacsim/extscache/omni.kit.pip_archive-0.0.0+6312fa25.lx64.cp312/pip_prebundle",
+        "/home/oscar/isaacsim/extscache/omni.usd.libs-1.0.3+6312fa25.lx64.r.cp312",
+        "/home/oscar/isaacsim/extscache/omni.usd-1.15.2+6312fa25.lx64.r.cp312",
         "/opt/ros/jazzy/lib/python3.12/site-packages",
         "/home/oscar/isaacsim/exts/isaacsim.simulation_app",
         "/home/oscar/isaacsim/exts/isaacsim.core.experimental.utils",
