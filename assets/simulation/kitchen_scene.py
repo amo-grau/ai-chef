@@ -32,6 +32,7 @@ from isaacsim.robot_motion.cumotion import load_cumotion_supported_robot
 import rclpy
 from assets.simulation.prepare_order_subscriber import PrepareOrderSubscriber
 from assets.simulation.robot_arm import RobotArm
+from assets.simulation.pick_and_place import PickAndPlace
 
 # ---------------------------------------------------------------------------------
 # Enable ROS 2 bridge extension
@@ -50,8 +51,14 @@ HAMBURGER_POSITION = (0.5, 0.4, 0.7)  # left side of the table
 CASE_POSITION = (0.5, -0.4, 0.73)  # right side of the table
 CASE_ORIENTATION = (0, 0, 180)
 
-# cuMotion's Franka c-space covers only the 7 arm joints (see robot.xrdf).
-_REACH = np.array([0.0, 0.2, 0.0, -1.6, 0.0, 1.8, 0.785])
+# Pick-and-place waypoints as cuMotion c-space targets: 7 arm joint positions
+# (see robot.xrdf). APPROXIMATE values — joint1 aims the arm at the hamburger
+# (atan2(0.4, 0.5) ≈ 0.675 rad) and the case (-0.675 rad); tune by jogging the
+# arm in the GUI and reading articulation.get_dof_positions().
+_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])  # Franka ready pose
+_PRE_PICK = np.array([0.675, 0.2, 0.0, -1.6, 0.0, 1.8, 0.785])   # above the hamburger
+_PICK = np.array([0.675, 0.45, 0.0, -1.25, 0.0, 1.7, 0.785])     # down at the hamburger
+_PLACE = np.array([-0.675, 0.45, 0.0, -1.25, 0.0, 1.7, 0.785])   # over the case
 
 
 stage_utils.open_stage(KITCHEN_SCENE_USD)
@@ -74,22 +81,22 @@ order_subscriber = PrepareOrderSubscriber()
 # ---------------------------------------------------------------------------------
 _active_order: str | None = None
 robot_arm = RobotArm(articulation, cumotion_robot)
+pick_and_place = PickAndPlace(robot_arm, _HOME, _PRE_PICK, _PICK, _PLACE)
 
 while simulation_app.is_running():
     rclpy.spin_once(order_subscriber, timeout_sec=0.0)
     simulation_app.update()
-    
+
     if _active_order is None and order_subscriber.has_next():
         _active_order = order_subscriber.next()
-        order_subscriber.get_logger().info(f"Starting motion for order {_active_order}")
-        robot_arm.set_target(_REACH, SimulationManager.get_simulation_time())
+        order_subscriber.get_logger().info(f"Starting pick and place for order {_active_order}")
+        pick_and_place.start()
 
-    if _active_order is not None:
-        robot_arm.update(SimulationManager.get_simulation_time())
+    pick_and_place.update(SimulationManager.get_simulation_time())
 
-        if not robot_arm.is_moving():
-            print("No orders pending")
-            _active_order = None
+    if _active_order is not None and pick_and_place.is_idle():
+        order_subscriber.get_logger().info(f"Order {_active_order} completed")
+        _active_order = None
 
 order_subscriber.destroy_node()
 rclpy.shutdown()
