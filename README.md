@@ -68,6 +68,40 @@ python -m kinematic_kitchen submit "patty,bun,sauce"
 
 This submits an order through the full stack and prints the generated order ID alongside a confirmation that the robot was notified.
 
+## Running the simulation
+
+The Isaac Sim scene (`assets/simulation/kitchen_scene.py`) loads the kitchen, tracks the scene's collision geometry as planning obstacles, and moves the Franka arm with cuMotion whenever an order arrives over ROS 2.
+
+### Prerequisites
+
+- **NVIDIA Isaac Sim 6.0** installed locally (the commands below assume `~/isaacsim`; adjust to your install path)
+- **ROS 2 Jazzy** at `/opt/ros/jazzy` (its Python must match Isaac Sim's — both use Python 3.12)
+- A display: the scene opens the Isaac Sim GUI (`headless: False`)
+
+### Start the scene
+
+From the repository root:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+PYTHONPATH=$(pwd):$PYTHONPATH ~/isaacsim/python.sh assets/simulation/kitchen_scene.py
+```
+
+Sourcing ROS 2 first puts `rclpy` on the path for Isaac Sim's bundled Python; **append** to `PYTHONPATH` rather than overwrite it, or the ROS 2 packages are lost again. The first launch downloads the Franka asset from NVIDIA's servers, so it needs network access and takes a little longer.
+
+### Send an order
+
+From a second terminal:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 topic pub --once /kinematic_kitchen/prepare_order std_msgs/String "{data: 'order-1'}"
+```
+
+The sim logs `Starting motion for order <id>` and the arm plans and executes a collision-free motion to the reach pose. Orders published while the arm is moving are queued and executed one after another.
+
+If the topic does not appear in `ros2 topic list`, make sure `ROS_DOMAIN_ID` is the same (or unset) in both terminals.
+
 ## Development
 
 ```bash

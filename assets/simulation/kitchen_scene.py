@@ -21,149 +21,97 @@ simulation_app = SimulationApp({"headless": False})
 
 # All Omniverse imports must come after SimulationApp is instantiated.
 import numpy as np
-import omni.usd
 import isaacsim.core.experimental.utils.app as app_utils
 import isaacsim.core.experimental.utils.stage as stage_utils
 from isaacsim.core.experimental.prims import Articulation
-from pxr import Gf, Usd, UsdGeom, UsdPhysics
+from isaacsim.core.rendering_manager import ViewportManager
+from assets.simulation.stage_utils import add_prop
+from isaacsim.core.simulation_manager import SimulationManager
+
+from isaacsim.robot_motion.cumotion import load_cumotion_supported_robot
 
 import rclpy
-from rclpy.node import Node
-from std_msgs.msg import String
+from assets.simulation.prepare_order_subscriber import PrepareOrderSubscriber
+from assets.simulation.robot_arm import RobotArm
+from assets.simulation.pick_and_place import PickAndPlace
 
 # ---------------------------------------------------------------------------------
 # Enable ROS 2 bridge extension
 # ---------------------------------------------------------------------------------
-
 app_utils.enable_extension("isaacsim.ros2.bridge")
 simulation_app.update()
 
 # ---------------------------------------------------------------------------------
 # Scene setup — load the authored static environment, then the ingredients
 # ---------------------------------------------------------------------------------
-
 SCENE_DIR = Path(__file__).resolve().parent.parent / "scene"
 KITCHEN_SCENE_USD = str(SCENE_DIR / "KitchenScene.usd")
 HAMBURGER_USD = str(SCENE_DIR / "hamburguer" / "Hamburguer.usd")
 CASE_USD = str(SCENE_DIR / "hamburguer" / "Case.usd")
-
-# Prop placement on the table (metres, Z-up) — TUNE to your table layout.
-# These assets are authored in non-metre units, so they need scaling down.
-# Adjust each scale until the prop is real-world sized (a burger is ~0.12 m).
 HAMBURGER_POSITION = (0.5, 0.4, 0.7)  # left side of the table
 CASE_POSITION = (0.5, -0.4, 0.73)  # right side of the table
 CASE_ORIENTATION = (0, 0, 180)
 
-def add_prop(
-    prim_path: str,
-    usd_path: str,
-    position: tuple[float, float, float],
-    orientation: tuple[float, float, float] = (0, 0, 0),
-    dynamic: bool = False,
-) -> None:
-    """Reference a prop under an Xform we own, place it, and optionally make it
-    a dynamic rigid body that falls under gravity and collides."""
-    xform = UsdGeom.Xform.Define(stage, prim_path)
-    xform.AddTranslateOp().Set(Gf.Vec3d(*position))
-    xform.AddRotateXYZOp().Set(Gf.Vec3f(*orientation))
-    xform.AddScaleOp().Set(Gf.Vec3f(1, 1, 1))
-    stage_utils.add_reference_to_stage(usd_path=usd_path, path=f"{prim_path}/Model")
+# Home is a c-space target: the Franka ready pose as 7 arm joint positions.
+_HOME = np.array([0.0, -np.pi / 4, 0.0, -3 * np.pi / 4, 0.0, np.pi / 2, np.pi / 4])
 
-    if dynamic:
-        body = stage.GetPrimAtPath(prim_path)
-        UsdPhysics.RigidBodyAPI.Apply(body)
-        # Dynamic bodies require a convex collision approximation, not a trimesh.
-        for mesh in Usd.PrimRange(body):
-            if mesh.IsA(UsdGeom.Mesh):
-                UsdPhysics.CollisionAPI.Apply(mesh)
-                UsdPhysics.MeshCollisionAPI.Apply(mesh).CreateApproximationAttr(
-                    "convexHull"
-                )
+# Pick-and-place waypoints as Cartesian poses of the planner's tool frame
+# (panda_leftfingertip, per the franka robot.xrdf) in the world frame:
+# (position [x, y, z], orientation quaternion [w, x, y, z]). The z heights are
+# APPROXIMATE (table top at z ≈ 0.65) — tune against the live scene.
+# Same tool-frame orientation the arm has at _HOME (verified via FK): the
+# gripper points straight down at every waypoint.
+_DOWNWARDS = np.array([0.0, 0.0, 1.0, 0.0])
+
+_PRE_PICK = (np.array([0.5, 0.4, 0.95]), _DOWNWARDS)   # above the hamburger
+_PICK = (np.array([0.5, 0.38, 0.67]), _DOWNWARDS)       # down at the hamburger
+_PLACE = (np.array([0.5, -0.4, 0.95]), _DOWNWARDS)     # over the case
 
 
 stage_utils.open_stage(KITCHEN_SCENE_USD)
-stage = omni.usd.get_context().get_stage()
 
 add_prop("/World/Hamburger", HAMBURGER_USD, HAMBURGER_POSITION, dynamic=True)
 add_prop("/World/Case", CASE_USD, CASE_POSITION, CASE_ORIENTATION, dynamic=True)
 
-# Franka prim path as authored in kitchen_scene.usd.
-franka = Articulation("/World/franka")
+articulation = Articulation("/World/franka")
+
+cumotion_robot = load_cumotion_supported_robot("franka")
+
+# Front view: camera on the +x side looking along -x at the table and robot.
+ViewportManager.set_camera_view(
+    "/OmniverseKit_Persp",
+    eye=[3.5, 0.0, 1.5],
+    target=[0.0, 0.0, 0.7],
+)
 
 app_utils.play()
 simulation_app.update()
 
-# ---------------------------------------------------------------------------------
-# ROS 2 preparation subscriber
-# ---------------------------------------------------------------------------------
-
-_pending_orders: list[str] = []
-
-
-class PrepareOrderSubscriber(Node):
-    def __init__(self) -> None:
-        super().__init__("kinematic_kitchen_scene")
-        self.create_subscription(
-            String,
-            "/kinematic_kitchen/prepare_order",
-            self._on_prepare_order,
-            10,
-        )
-
-    def _on_prepare_order(self, msg: String) -> None:
-        self.get_logger().info(f"Preparing order: {msg.data}")
-        _pending_orders.append(msg.data)
-
-
-rclpy.init()
-subscriber = PrepareOrderSubscriber()
-
-# ---------------------------------------------------------------------------------
-# Joint motion helpers
-# ---------------------------------------------------------------------------------
-
-# Franka home configuration (7 arm joints + 2 finger joints = 9 DOF)
-_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04])
-_REACH = np.array([0.0, 0.2, 0.0, -1.6, 0.0, 1.8, 0.785, 0.04, 0.04])
-
-_REACH_STEPS = 60
-_RETURN_STEPS = 60
-_TOTAL_STEPS = _REACH_STEPS + _RETURN_STEPS
-
-
-def _lerp(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
-    return a + (b - a) * t
-
-
-def _target_for_frame(frame: int) -> np.ndarray:
-    if frame < _REACH_STEPS:
-        return _lerp(_HOME, _REACH, frame / _REACH_STEPS)
-    return _lerp(_REACH, _HOME, (frame - _REACH_STEPS) / _RETURN_STEPS)
-
+rclpy.init()    
+order_subscriber = PrepareOrderSubscriber()
 
 # ---------------------------------------------------------------------------------
 # Simulation loop
 # ---------------------------------------------------------------------------------
-
-_motion_frame = 0
 _active_order: str | None = None
+robot_arm = RobotArm(articulation, cumotion_robot)
+pick_and_place = PickAndPlace(robot_arm, _HOME, _PRE_PICK, _PICK, _PLACE)
 
 while simulation_app.is_running():
-    rclpy.spin_once(subscriber, timeout_sec=0.0)
+    rclpy.spin_once(order_subscriber, timeout_sec=0.0)
     simulation_app.update()
 
-    if _active_order is None and _pending_orders:
-        _active_order = _pending_orders.pop(0)
-        _motion_frame = 0
-        subscriber.get_logger().info(f"Starting motion for order {_active_order}")
+    if _active_order is None and order_subscriber.has_next():
+        _active_order = order_subscriber.next()
+        order_subscriber.get_logger().info(f"Starting pick and place for order {_active_order}")
+        pick_and_place.start()
 
-    if _active_order is not None:
-        franka.set_dof_position_targets(_target_for_frame(_motion_frame))
-        _motion_frame += 1
-        if _motion_frame >= _TOTAL_STEPS:
-            subscriber.get_logger().info(f"Order {_active_order} preparation complete")
-            _active_order = None
+    pick_and_place.update(SimulationManager.get_simulation_time())
 
-subscriber.destroy_node()
+    if _active_order is not None and pick_and_place.is_idle():
+        order_subscriber.get_logger().info(f"Order {_active_order} completed")
+        _active_order = None
+
+order_subscriber.destroy_node()
 rclpy.shutdown()
 simulation_app.close()
