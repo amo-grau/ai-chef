@@ -88,6 +88,7 @@ while simulation_app.is_running():
         robot_arm.update(SimulationManager.get_simulation_time())
 
         if not robot_arm.is_moving():
+            print("No orders pending")
             _active_order = None
 
 order_subscriber.destroy_node()

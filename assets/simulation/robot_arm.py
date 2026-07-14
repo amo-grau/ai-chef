@@ -36,7 +36,7 @@ class RobotArm:
             # The robot must not be a world obstacle for its own planner: cuMotion
             # handles self-collision via its robot model, and the Franka asset's
             # finger geometry carries non-unity scaling that world tracking rejects.
-            exclude_prim_paths="/World/franka",
+            exclude_prim_paths=["/World/franka", "/World/Hamburger"]
         )
         # WorldBinding queries local scales/poses on tracked prims and requires the
         # standard translate/orient/scale op stack; this rewrite preserves world poses.
@@ -60,6 +60,13 @@ class RobotArm:
         self._max_accelerations = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])  # rad/s²
         self._trajectory_follower = TrajectoryFollower()
         self._is_moving = False
+        self._GRIPPER_THRESHOLD: float = 0.04
+        self._OPENED_POSE = 0.5
+        self._CLOSED_POSE = 0.0
+        print(self._articulation.dof_names)
+        self._finger_idx = self._articulation.dof_names.index("panda_finger_joint1")
+        self._is_grasping = False
+
 
     def set_target(self, target: np.ndarray, current_time: float):
         self._world_binding.synchronize_transforms()
@@ -111,3 +118,24 @@ class RobotArm:
 
     def is_moving(self):
         return self._is_moving
+    
+    def open(self):
+        self._set_gripper(self._OPENED_POSE)
+
+    def close(self):
+        self._set_gripper(self._CLOSED_POSE)
+
+    def _set_gripper(self, pos: float) -> None:
+        self._articulation.set_dof_position_targets(
+            np.array([pos], dtype=np.float32), dof_indices=[self._finger_idx]
+        )
+
+    def _is_closed(self):
+        return self._is_gripper_at(self._CLOSED_POSE)
+
+    def _is_opened(self):
+        return self._is_gripper_at(self._OPENED_POSE)
+    
+    def _is_gripper_at(self, target: float):
+        pos = float(self._articulation.get_dof_positions().numpy().flatten()[self._finger_idx])
+        return abs(pos - target) < self._GRIPPER_THRESHOLD
