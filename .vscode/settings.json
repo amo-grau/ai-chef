@@ -12,6 +12,7 @@
         "/home/oscar/isaacsim/exts/isaacsim.core.experimental.objects",
         "/home/oscar/isaacsim/exts/isaacsim.core.experimental.prims",
         "/home/oscar/isaacsim/exts/isaacsim.core.simulation_manager",
+        "/home/oscar/isaacsim/exts/isaacsim.core.rendering_manager",
         "/home/oscar/isaacsim/exts/isaacsim.robot_motion.cumotion",
         "/home/oscar/isaacsim/exts/isaacsim.robot_motion.experimental.motion_generation",
         "/home/oscar/isaacsim/exts/isaacsim.storage.native",

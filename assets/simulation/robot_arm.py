@@ -41,7 +41,7 @@ class RobotArm:
         # WorldBinding queries local scales/poses on tracked prims and requires the
         # standard translate/orient/scale op stack; this rewrite preserves world poses.
         XformPrim(paths=collision_objects, reset_xform_op_properties=True)
-        world_interface = CumotionWorldInterface(visualize_debug_prims=True)
+        world_interface = CumotionWorldInterface(visualize_debug_prims=False)
         self._world_binding = WorldBinding(
             world_interface=world_interface,
             obstacle_strategy=obstacle_strategy,
@@ -56,10 +56,16 @@ class RobotArm:
             cumotion_robot=self._cumotion_robot,
             cumotion_world_interface=self._world_binding.get_world_interface()
         )
-        self._max_velocities = np.array([2.0, 2.0, 2.0, 2.0, 2.5, 2.5, 2.5])  # rad/s
-        self._max_accelerations = np.array([2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0])  # rad/s²
+        # Franka joint limits, from the cuMotion franka config (robot.urdf /
+        # robot.xrdf): the trajectory runs as fast as the hardware allows.
+        self._max_velocities = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])  # rad/s
+        self._max_accelerations = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0])  # rad/s²
         self._trajectory_follower = TrajectoryFollower()
         self._is_moving = False
+        # Final state of the current trajectory; held as the drive target after
+        # the trajectory clock expires, until the joints physically converge.
+        self._final_state = None
+        self._ARM_TOLERANCE = 0.02  # rad, per joint
         # Each Franka finger joint travels 0..0.04 m.
         self._OPENED_POSE = 0.04
         self._CLOSED_POSE = 0.0
@@ -72,13 +78,30 @@ class RobotArm:
         self._is_opening = False
         self._is_closing = False
 
-    def set_target(self, target: np.ndarray, current_time: float) -> bool:
-        """Plan and start following a trajectory. Returns False if no path exists."""
-        self._world_binding.synchronize_transforms()
-        arm_indices = [self._articulation.dof_names.index(j) for j in self._cumotion_robot.controlled_joint_names]
-        q_initial = self._articulation.get_dof_positions().numpy().flatten()[arm_indices]
-        path = self._planner.plan_to_cspace_target(q_initial, target)
+    def set_pose_target(self, position: np.ndarray, orientation: np.ndarray, current_time: float) -> bool:
+        """Plan to a world-frame pose (task-space) and start following the trajectory.
 
+        orientation is a [w, x, y, z] quaternion; it is fully constrained.
+        Returns False if no collision-free path exists.
+        """
+        self._world_binding.synchronize_transforms()
+        path = self._planner.plan_to_pose_target(self._current_arm_configuration(), position, orientation)
+        return self._follow_path(path, current_time)
+
+    def set_cspace_target(self, target: np.ndarray, current_time: float) -> bool:
+        """Plan to a joint configuration (7 arm joints) and start following the trajectory.
+
+        Returns False if no collision-free path exists.
+        """
+        self._world_binding.synchronize_transforms()
+        path = self._planner.plan_to_cspace_target(self._current_arm_configuration(), target)
+        return self._follow_path(path, current_time)
+
+    def _current_arm_configuration(self) -> np.ndarray:
+        arm_indices = [self._articulation.dof_names.index(j) for j in self._cumotion_robot.controlled_joint_names]
+        return self._articulation.get_dof_positions().numpy().flatten()[arm_indices]
+
+    def _follow_path(self, path, current_time: float) -> bool:
         if path is None:
             self._is_moving = False
             return False
@@ -91,6 +114,7 @@ class RobotArm:
         )
 
         self._trajectory_follower.set_trajectory(trajectory)
+        self._final_state = trajectory.get_target_state(trajectory.duration)
         joint_state = JointState.from_name(
             robot_joint_space=self._articulation.dof_names,
             positions=(self._articulation.dof_names, self._articulation.get_dof_positions()),
@@ -118,6 +142,17 @@ class RobotArm:
                 dof_indices=desired_state.joints.position_indices
             )
             self._is_moving = True
+        elif self._is_moving and self._final_state is not None:
+            # The trajectory clock has expired, but the physical arm lags the
+            # commanded trajectory. Hold the final target and only report the
+            # motion finished once the joints have actually converged on it.
+            self._articulation.set_dof_position_targets(
+                positions=self._final_state.joints.positions,
+                dof_indices=self._final_state.joints.position_indices
+            )
+            self._is_moving = not self._arm_at_final_state()
+            if not self._is_moving:
+                self._final_state = None
         else:
             self._is_moving = False
 
@@ -125,6 +160,12 @@ class RobotArm:
             self._is_closing = not self._is_closed()
         if self._is_opening:
             self._is_opening = not self._is_opened()
+
+    def _arm_at_final_state(self) -> bool:
+        target = self._final_state.joints.positions.numpy().flatten()
+        indices = self._final_state.joints.position_indices.numpy().flatten()
+        current = self._articulation.get_dof_positions().numpy().flatten()[indices]
+        return bool(np.max(np.abs(current - target)) < self._ARM_TOLERANCE)
 
     def is_active(self):
         return self._is_moving or self._is_closing or self._is_opening

@@ -24,6 +24,7 @@ import numpy as np
 import isaacsim.core.experimental.utils.app as app_utils
 import isaacsim.core.experimental.utils.stage as stage_utils
 from isaacsim.core.experimental.prims import Articulation
+from isaacsim.core.rendering_manager import ViewportManager
 from assets.simulation.stage_utils import add_prop
 from isaacsim.core.simulation_manager import SimulationManager
 
@@ -51,14 +52,20 @@ HAMBURGER_POSITION = (0.5, 0.4, 0.7)  # left side of the table
 CASE_POSITION = (0.5, -0.4, 0.73)  # right side of the table
 CASE_ORIENTATION = (0, 0, 180)
 
-# Pick-and-place waypoints as cuMotion c-space targets: 7 arm joint positions
-# (see robot.xrdf). APPROXIMATE values — joint1 aims the arm at the hamburger
-# (atan2(0.4, 0.5) ≈ 0.675 rad) and the case (-0.675 rad); tune by jogging the
-# arm in the GUI and reading articulation.get_dof_positions().
-_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])  # Franka ready pose
-_PRE_PICK = np.array([0.675, 0.2, 0.0, -1.6, 0.0, 1.8, 0.785])   # above the hamburger
-_PICK = np.array([0.675, 0.45, 0.0, -1.25, 0.0, 1.7, 0.785])     # down at the hamburger
-_PLACE = np.array([-0.675, 0.45, 0.0, -1.25, 0.0, 1.7, 0.785])   # over the case
+# Home is a c-space target: the Franka ready pose as 7 arm joint positions.
+_HOME = np.array([0.0, -np.pi / 4, 0.0, -3 * np.pi / 4, 0.0, np.pi / 2, np.pi / 4])
+
+# Pick-and-place waypoints as Cartesian poses of the planner's tool frame
+# (panda_leftfingertip, per the franka robot.xrdf) in the world frame:
+# (position [x, y, z], orientation quaternion [w, x, y, z]). The z heights are
+# APPROXIMATE (table top at z ≈ 0.65) — tune against the live scene.
+# Same tool-frame orientation the arm has at _HOME (verified via FK): the
+# gripper points straight down at every waypoint.
+_DOWNWARDS = np.array([0.0, 0.0, 1.0, 0.0])
+
+_PRE_PICK = (np.array([0.5, 0.4, 0.95]), _DOWNWARDS)   # above the hamburger
+_PICK = (np.array([0.5, 0.38, 0.67]), _DOWNWARDS)       # down at the hamburger
+_PLACE = (np.array([0.5, -0.4, 0.95]), _DOWNWARDS)     # over the case
 
 
 stage_utils.open_stage(KITCHEN_SCENE_USD)
@@ -69,6 +76,13 @@ add_prop("/World/Case", CASE_USD, CASE_POSITION, CASE_ORIENTATION, dynamic=True)
 articulation = Articulation("/World/franka")
 
 cumotion_robot = load_cumotion_supported_robot("franka")
+
+# Front view: camera on the +x side looking along -x at the table and robot.
+ViewportManager.set_camera_view(
+    "/OmniverseKit_Persp",
+    eye=[3.5, 0.0, 1.5],
+    target=[0.0, 0.0, 0.7],
+)
 
 app_utils.play()
 simulation_app.update()
