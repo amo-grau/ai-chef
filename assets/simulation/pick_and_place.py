@@ -20,7 +20,7 @@ class States(Enum):
 class PickAndPlace:
     """One pick-and-place cycle driven by a RobotArm, starting and ending at home.
 
-    home is a joint configuration (c-space, 7 arm joints); the pick and place
+    home is a joint configuration (c-space, one value per arm joint); the pick and place
     waypoints are Cartesian end-effector poses in the world frame. Call start()
     to arm one cycle; update() advances the state machine whenever the arm
     finishes its current motion.

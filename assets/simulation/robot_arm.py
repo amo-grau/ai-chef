@@ -1,8 +1,14 @@
 # This module uses Omniverse imports, so it must only be imported after the
 # entry-point script has instantiated SimulationApp.
 import numpy as np
+import isaacsim.core.experimental.utils.app as app_utils
+
+app_utils.enable_extension("isaacsim.robot.surface_gripper")
+
 from isaacsim.core.experimental.prims import Articulation, XformPrim
 from isaacsim.core.experimental.objects import Mesh
+from isaacsim.robot.surface_gripper import GripperView
+from isaacsim.robot.surface_gripper.bindings._surface_gripper import GripperStatus
 from isaacsim.robot_motion.experimental.motion_generation import (
     SceneQuery,
     TrackableApi,
@@ -21,9 +27,10 @@ from isaacsim.robot_motion.cumotion import (
 
 
 class RobotArm:
-    def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot):
+    def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, robot_prim_path: str, gripper_prim_path: str, robot_max_velocities: np.ndarray, robot_max_accelerations: np.ndarray, arm_tolerance: float):
         self._articulation = articulation
         self._cumotion_robot = cumotion_robot
+        self._suction = self._wrap_suction_gripper(gripper_prim_path)
         obstacle_strategy = ObstacleStrategy()
         obstacle_strategy.set_default_safety_tolerance(0.06)
         obstacle_strategy.set_default_configuration(Mesh, ObstacleConfiguration("obb", 0.01))
@@ -33,10 +40,10 @@ class RobotArm:
             search_box_minimum=[-100.0, -100.0, -100.0],
             search_box_maximum=[100.0, 100.0, 100.0],
             tracked_api=TrackableApi.PHYSICS_COLLISION,
-            # The robot must not be a world obstacle for its own planner: cuMotion
-            # handles self-collision via its robot model, and the Franka asset's
-            # finger geometry carries non-unity scaling that world tracking rejects.
-            exclude_prim_paths=["/World/franka", "/World/Hamburger"]
+            # The robot must not be a world obstacle for its own planner:
+            # cuMotion handles self-collision via its robot model. The
+            # hamburger is excluded so the planner lets the cup touch it.
+            exclude_prim_paths=[robot_prim_path, "/World/Hamburger"]
         )
         # WorldBinding queries local scales/poses on tracked prims and requires the
         # standard translate/orient/scale op stack; this rewrite preserves world poses.
@@ -56,25 +63,16 @@ class RobotArm:
             cumotion_robot=self._cumotion_robot,
             cumotion_world_interface=self._world_binding.get_world_interface()
         )
-        # Franka joint limits, from the cuMotion franka config (robot.urdf /
+        # Per-joint limits from the robot's cuMotion config (robot.urdf /
         # robot.xrdf): the trajectory runs as fast as the hardware allows.
-        self._max_velocities = np.array([2.175, 2.175, 2.175, 2.175, 2.61, 2.61, 2.61])  # rad/s
-        self._max_accelerations = np.array([15.0, 7.5, 10.0, 12.5, 15.0, 20.0, 20.0])  # rad/s²
+        self._max_velocities = robot_max_velocities
+        self._max_accelerations = robot_max_accelerations
         self._trajectory_follower = TrajectoryFollower()
         self._is_moving = False
         # Final state of the current trajectory; held as the drive target after
         # the trajectory clock expires, until the joints physically converge.
         self._final_state = None
-        self._ARM_TOLERANCE = 0.02  # rad, per joint
-        # Each Franka finger joint travels 0..0.04 m.
-        self._OPENED_POSE = 0.04
-        self._CLOSED_POSE = 0.0
-        self._GRIPPER_TOLERANCE = 0.005
-        # Driving panda_finger_joint1 is enough: the Franka articulation moves
-        # the second finger in tandem.
-        self._finger_indices = [
-            self._articulation.dof_names.index("panda_finger_joint1")
-        ]
+        self._arm_tolerance = arm_tolerance
         self._is_opening = False
         self._is_closing = False
 
@@ -89,10 +87,15 @@ class RobotArm:
         return self._follow_path(path, current_time)
 
     def set_cspace_target(self, target: np.ndarray, current_time: float) -> bool:
-        """Plan to a joint configuration (7 arm joints) and start following the trajectory.
+        """Plan to a joint configuration (one per controlled arm joint) and start following the trajectory.
 
         Returns False if no collision-free path exists.
         """
+        # Already at the target: nothing to plan or follow (the graph planner
+        # finds no path for a zero-length problem). Happens whenever a cycle
+        # starts with the arm resting at home.
+        if np.max(np.abs(self._current_arm_configuration() - target)) < self._arm_tolerance:
+            return True
         self._world_binding.synchronize_transforms()
         path = self._planner.plan_to_cspace_target(self._current_arm_configuration(), target)
         return self._follow_path(path, current_time)
@@ -165,34 +168,46 @@ class RobotArm:
         target = self._final_state.joints.positions.numpy().flatten()
         indices = self._final_state.joints.position_indices.numpy().flatten()
         current = self._articulation.get_dof_positions().numpy().flatten()[indices]
-        return bool(np.max(np.abs(current - target)) < self._ARM_TOLERANCE)
+        return bool(np.max(np.abs(current - target)) < self._arm_tolerance)
 
     def is_active(self):
         return self._is_moving or self._is_closing or self._is_opening
     
     def open(self):
         self._is_opening = True
-        self._set_gripper(self._OPENED_POSE)
+        self._suction.apply_gripper_action([-1.0])
 
     def close(self):
         self._is_closing = True
-        self._set_gripper(self._CLOSED_POSE)
-
-    def _set_gripper(self, pos: float) -> None:
-        self._articulation.set_dof_position_targets([pos], dof_indices=self._finger_indices)
+        self._suction.apply_gripper_action([1.0])
 
     def _is_opened(self):
-        return self._finger_position() > self._OPENED_POSE - self._GRIPPER_TOLERANCE
+        return self._gripper_status() == GripperStatus.Open
 
     def _is_closed(self):
-        # When grasping, the fingers stall on the object before reaching the
-        # closed pose, so "closed" means: no longer open and no longer moving.
-        no_longer_open = self._finger_position() < self._OPENED_POSE - self._GRIPPER_TOLERANCE
-        stalled = abs(self._finger_velocity()) < 1e-3
-        return no_longer_open and stalled
+        # Closed means the suction cup has actually attached an object; while
+        # commanded shut with nothing in range the status stays "Closing".
+        return self._gripper_status() == GripperStatus.Closed
 
-    def _finger_position(self) -> float:
-        return float(self._articulation.get_dof_positions().numpy().flatten()[self._finger_indices[0]])
+    def _gripper_status(self) -> GripperStatus:
+        return GripperStatus(self._suction.get_surface_gripper_status()[0])
 
-    def _finger_velocity(self) -> float:
-        return float(self._articulation.get_dof_velocities().numpy().flatten()[self._finger_indices[0]])
+    def _wrap_suction_gripper(self, gripper_prim_path: str) -> GripperView:
+        """Wrap the surface-gripper suction cup authored in the robot asset.
+
+        The surface-gripper plugin registers the gripper when the timeline
+        starts playing, so the view only needs its prim path. The asset's
+        properties are overridden to make attachment forgiving: objects
+        within max_grip_distance of the cup get rigidly attached on
+        close(), and while "Closing" the attach keeps being retried (e.g.
+        commanded slightly before contact) instead of giving up after one
+        attempt.
+        """
+        gripper = GripperView(paths=gripper_prim_path)
+        gripper.set_surface_gripper_properties(
+            max_grip_distance=[0.05],
+            coaxial_force_limit=[500.0],
+            shear_force_limit=[500.0],
+            retry_interval=[2.0],
+        )
+        return gripper
