@@ -66,13 +66,13 @@ _HOME = np.array([-1.57, -1.57, -1.57, -1.57, 1.57, 0.0])
 # suction cup points straight down at every waypoint.
 _DOWNWARDS = np.array([0.0, 1.0, 0.0, 0.0])
 
-_CUP_LENGTH = 0.22
+_CUP_LENGTH = 0.12
 
 _PRE_PICK = (np.array([0.5, 0.4, 0.95 + _CUP_LENGTH]), _DOWNWARDS)   # above the hamburger
 # Cup tip stops ~4 cm above the hamburger top (z ≈ 0.67), centred on it;
-# the suction's max grip distance (5 cm) closes the remaining gap without
+# the suction's max grip distance (1 cm) closes the remaining gap without
 # the cup ever touching and shoving the hamburger.
-_PICK = (np.array([0.5, 0.4, 0.71 + _CUP_LENGTH]), _DOWNWARDS)       # down at the hamburger
+_PICK = (np.array([0.5, 0.4, 0.75 + _CUP_LENGTH]), _DOWNWARDS)       # down at the hamburger
 _PLACE = (np.array([0.5, -0.4, 0.95 + _CUP_LENGTH]), _DOWNWARDS)     # over the case
 
 

@@ -205,7 +205,7 @@ class RobotArm:
         """
         gripper = GripperView(paths=gripper_prim_path)
         gripper.set_surface_gripper_properties(
-            max_grip_distance=[0.05],
+            max_grip_distance=[0.01],
             coaxial_force_limit=[500.0],
             shear_force_limit=[500.0],
             retry_interval=[2.0],
