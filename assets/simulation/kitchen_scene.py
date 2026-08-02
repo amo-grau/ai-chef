@@ -25,7 +25,7 @@ import isaacsim.core.experimental.utils.app as app_utils
 import isaacsim.core.experimental.utils.stage as stage_utils
 from isaacsim.core.experimental.prims import Articulation
 from isaacsim.core.rendering_manager import ViewportManager
-from assets.simulation.stage_utils import add_prop
+from assets.simulation.stage_utils import add_prop, add_static_block
 from isaacsim.core.simulation_manager import SimulationManager
 
 from isaacsim.robot_motion.cumotion import load_cumotion_supported_robot
@@ -48,11 +48,19 @@ simulation_app.update()
 SCENE_DIR = Path(__file__).resolve().parent.parent / "scene"
 KITCHEN_SCENE_USD = str(SCENE_DIR / "KitchenSceneUr.usd")
 HAMBURGER_USD = str(SCENE_DIR / "hamburguer" / "Hamburguer.usd")
-CASE_USD = str(SCENE_DIR / "hamburguer" / "Case.usd")
+CASE_USD = str(SCENE_DIR / "hamburguer" / "SplitCase.usd")
 HAMBURGER_POSITION = (0.5, 0.4, 0.7)  # left side of the table
-CASE_POSITION = (0.5, -0.4, 0.73)  # right side of the table
+CASE_POSITION = (0.5, -0.4, 0.8)  # right side of the table
 CASE_ORIENTATION = (0, 0, 180)
 TABLE_POSITION = (0.85, 0, 0)
+# Small backstop propping up the open lid: since the mesh trim no longer
+# reaches the table, nothing stops the lid from swinging past its intended
+# open angle. Sits at table height, same material as the table top.
+# POSITION IS APPROXIMATE — nudge x/y in the GUI once you can see which way
+# the lid actually swings open; it needs to be directly under where the lid's
+# open edge comes to rest.
+CASE_SUPPORT_SIZE = (0.1, 0.07, 0.03)  # width, depth, height (m)
+CASE_SUPPORT_POSITION = (0.5, -0.5, 0.65 + CASE_SUPPORT_SIZE[2] / 2)
 
 _HOME = np.array([-1.57, -1.57, -1.57, -1.57, 1.57, 0.0])
 
@@ -79,11 +87,11 @@ _PRE_PICK = (np.array([0.5, 0.4, 0.95 + _CUP_LENGTH]), _DOWNWARDS)   # above the
 # sideways against the burger. The suction's max grip distance (1 cm)
 # closes the remaining millimetres of gap.
 _PICK = (np.array([0.5, 0.4, 0.77 + _CUP_LENGTH]), _DOWNWARDS)       # down at the hamburger
-_PLACE = (np.array([0.5, -0.35, 0.95 + _CUP_LENGTH]), _DOWNWARDS)     # over the case
+_PLACE = (np.array([0.5, -0.34, 0.95 + _CUP_LENGTH]), _DOWNWARDS)     # over the case
 # Lowered release point: from _PLACE the arm descends straight down to here
 # before opening, so the burger falls a short distance into the case instead
 # of dropping from the full approach height (case rim top at z ≈ 0.80).
-_DROP = (np.array([0.5, -0.35, 0.85 + _CUP_LENGTH]), _DOWNWARDS)
+_DROP = (np.array([0.5, -0.34, 0.85 + _CUP_LENGTH]), _DOWNWARDS)
 
 # Hold the drop pose this long (simulation seconds) after releasing, so the
 # burger falls clear of the cup before the arm drives home.
@@ -98,7 +106,19 @@ table.reset_xform_op_properties()
 table.set_world_poses(positions=[TABLE_POSITION])
 
 add_prop("/World/Hamburger", HAMBURGER_USD, HAMBURGER_POSITION, dynamic=True)
-add_prop("/World/Case", CASE_USD, CASE_POSITION, CASE_ORIENTATION, dynamic=True)
+# Not dynamic: CaseSplit.usdc already authors its own Base/Lid RigidBodyAPI,
+# collision, and the revolute joint between them. Applying add_prop's dynamic
+# sweep here would add a redundant RigidBodyAPI on this wrapper Xform, above
+# the already-rigid Base/Lid children — an invalid nested rigid body — and
+# overwrite their authored collision approximation with a hardcoded convexHull.
+add_prop("/World/Case", CASE_USD, CASE_POSITION, CASE_ORIENTATION)
+
+add_static_block(
+    "/World/CaseSupport",
+    CASE_SUPPORT_SIZE,
+    CASE_SUPPORT_POSITION,
+    material_path="/World/CokingTable/Looks/Aluminum_Brushed",
+)
 
 articulation = Articulation("/World/ur10")
 
