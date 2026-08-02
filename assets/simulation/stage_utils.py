@@ -29,5 +29,5 @@ def add_prop(
             if mesh.IsA(UsdGeom.Mesh):
                 UsdPhysics.CollisionAPI.Apply(mesh)
                 UsdPhysics.MeshCollisionAPI.Apply(mesh).CreateApproximationAttr(
-                    "convexHull"
+                    "convexDecomposition"
                 )

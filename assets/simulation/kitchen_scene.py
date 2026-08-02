@@ -62,18 +62,32 @@ _HOME = np.array([-1.57, -1.57, -1.57, -1.57, 1.57, 0.0])
 # tool0 along its +z, so with the tool pointing down each waypoint is the
 # intended cup-tip height plus that offset. The cup-tip z heights are
 # APPROXIMATE (table top at z ≈ 0.65) — tune against the live scene.
-# Same tool-frame orientation the arm has at _HOME (verified via FK): the
-# suction cup points straight down at every waypoint.
-_DOWNWARDS = np.array([0.0, 1.0, 0.0, 0.0])
+# The suction cup points straight down at every waypoint. The yaw (rotation
+# about the vertical) is NOT arbitrary: the gripper's camera assembly sticks
+# out sideways, and with the opposite yaw (0, 1, 0, 0) it wedges against the
+# forearm as the elbow folds during the pick descent — the drives (56 N·m)
+# cannot push through the contact and the arm stalls short of the target.
+# This yaw keeps the camera on the far side (~11 cm of clearance).
+_DOWNWARDS = np.array([0.0, 0.0, 1.0, 0.0])
 
 _CUP_LENGTH = 0.12
 
 _PRE_PICK = (np.array([0.5, 0.4, 0.95 + _CUP_LENGTH]), _DOWNWARDS)   # above the hamburger
-# Cup tip stops ~4 cm above the hamburger top (z ≈ 0.67), centred on it;
-# the suction's max grip distance (1 cm) closes the remaining gap without
-# the cup ever touching and shoving the hamburger.
-_PICK = (np.array([0.5, 0.4, 0.75 + _CUP_LENGTH]), _DOWNWARDS)       # down at the hamburger
-_PLACE = (np.array([0.5, -0.4, 0.95 + _CUP_LENGTH]), _DOWNWARDS)     # over the case
+# Cup tip stops AT the hamburger's top surface (z ≈ 0.67): the pose must be
+# physically reachable, or the arm can never converge on it and the state
+# machine deadlocks in DRIVING_TO_PICK while the drives grind the cup
+# sideways against the burger. The suction's max grip distance (1 cm)
+# closes the remaining millimetres of gap.
+_PICK = (np.array([0.5, 0.4, 0.77 + _CUP_LENGTH]), _DOWNWARDS)       # down at the hamburger
+_PLACE = (np.array([0.5, -0.35, 0.95 + _CUP_LENGTH]), _DOWNWARDS)     # over the case
+# Lowered release point: from _PLACE the arm descends straight down to here
+# before opening, so the burger falls a short distance into the case instead
+# of dropping from the full approach height (case rim top at z ≈ 0.80).
+_DROP = (np.array([0.5, -0.35, 0.85 + _CUP_LENGTH]), _DOWNWARDS)
+
+# Hold the drop pose this long (simulation seconds) after releasing, so the
+# burger falls clear of the cup before the arm drives home.
+_DROP_DWELL = 1.0
 
 
 stage_utils.open_stage(KITCHEN_SCENE_USD)
@@ -127,7 +141,7 @@ robot_max_velocities = np.array([2.16, 2.16, 3.15, 3.2, 3.2, 3.2])
 robot_max_accelerations = np.array([4.0, 4.0, 4.0, 4.0, 4.0, 4.0])
 arm_tolerance = 0.02
 robot_arm = RobotArm(articulation, cumotion_robot, robot_prim_path, gripper_prim_path, robot_max_velocities, robot_max_accelerations, arm_tolerance)
-pick_and_place = PickAndPlace(robot_arm, _HOME, _PRE_PICK, _PICK, _PLACE)
+pick_and_place = PickAndPlace(robot_arm, _HOME, _PRE_PICK, _PICK, _PLACE, _DROP, drop_dwell=_DROP_DWELL)
 
 while simulation_app.is_running():
     rclpy.spin_once(order_subscriber, timeout_sec=0.0)
