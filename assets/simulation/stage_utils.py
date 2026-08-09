@@ -2,7 +2,7 @@
 # All Omniverse imports must come after SimulationApp is instantiated.
 import omni.usd
 import isaacsim.core.experimental.utils.stage as stage_utils
-from pxr import Gf, Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 def add_prop(
     prim_path: str,
@@ -31,3 +31,34 @@ def add_prop(
                 UsdPhysics.MeshCollisionAPI.Apply(mesh).CreateApproximationAttr(
                     "convexDecomposition"
                 )
+
+
+def add_static_block(
+    prim_path: str,
+    size: tuple[float, float, float],
+    position: tuple[float, float, float],
+    orientation: tuple[float, float, float] = (0, 0, 0),
+    material_path: str | None = None,
+) -> None:
+    """Author a fixed (non-rigid-body) box collider, e.g. a support prop.
+
+    size is the full (width, depth, height) of the block in metres. Uses
+    UsdGeom.Cube's analytic box collision shape (exact, no mesh cooking),
+    which is why a non-uniform scale is fine here — unlike the dynamic case
+    props above, there is no joint whose local frame depends on this prim's
+    vertex coordinates.
+    """
+    stage = omni.usd.get_context().get_stage()
+
+    cube = UsdGeom.Cube.Define(stage, prim_path)
+    cube.CreateSizeAttr(1.0)
+    xformable = UsdGeom.Xformable(cube)
+    xformable.AddTranslateOp().Set(Gf.Vec3d(*position))
+    xformable.AddRotateXYZOp().Set(Gf.Vec3f(*orientation))
+    xformable.AddScaleOp().Set(Gf.Vec3f(*size))
+
+    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+
+    if material_path is not None:
+        material = UsdShade.Material(stage.GetPrimAtPath(material_path))
+        UsdShade.MaterialBindingAPI.Apply(cube.GetPrim()).Bind(material)
