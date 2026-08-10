@@ -4,7 +4,6 @@ import numpy as np
 import isaacsim.core.experimental.utils.app as app_utils
 
 app_utils.enable_extension("isaacsim.robot.surface_gripper")
-
 from isaacsim.core.experimental.prims import Articulation, XformPrim
 from isaacsim.core.experimental.objects import Mesh
 from isaacsim.robot.surface_gripper import GripperView
@@ -18,9 +17,9 @@ from isaacsim.robot_motion.experimental.motion_generation import (
     TrajectoryFollower,
     JointState,
     RobotState,
-    Path
+    Trajectory
 )
-import cumotion
+
 from isaacsim.robot_motion.cumotion import (
     CumotionRobot,
     CumotionWorldInterface,
@@ -29,6 +28,7 @@ from isaacsim.robot_motion.cumotion import (
 )
 from isaacsim.robot_motion.cumotion.impl.utils import isaac_sim_to_cumotion_pose
 
+from drive_command import TargetSpace, OptimizedTrajectoryGenerator, LinearTrajectoryGenerator
 
 class RobotArm:
     def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, robot_prim_path: str, gripper_prim_path: str, robot_max_velocities: np.ndarray, robot_max_accelerations: np.ndarray, arm_tolerance: float):
@@ -91,34 +91,40 @@ class RobotArm:
         self._final_state = None
         self._arm_tolerance = arm_tolerance
         self._is_opening = False
-        self._is_closing = False
+        self._is_closing = False      
 
     def set_pose_target(self, position: np.ndarray, orientation: np.ndarray, current_time: float) -> bool:
         """Plan to a world-frame pose (task-space) and start following the trajectory.
 
         orientation is a [w, x, y, z] quaternion; it is fully constrained.
         Returns False if no collision-free path exists.
-        """
+        """        
+        target = np.concatenate((position, orientation))
+        generator = OptimizedTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
+        generator.set_mode(TargetSpace.CSPACE)
+        trajectory = generator.generate_trajectory(target, current_time)
 
-        
-        self._world_binding.synchronize_transforms()
-        path = self._planner.plan_to_pose_target(self._current_arm_configuration(), position, orientation)
-        return self._follow_path(path, current_time)
+        if trajectory is None or not self._starts_at_current_configuration(trajectory):
+            self._is_moving = False
+            return False
 
+        return self._follow_trajectory(trajectory, current_time)
+    
     def set_cspace_target(self, target: np.ndarray, current_time: float) -> bool:
         """Plan to a joint configuration (one per controlled arm joint) and start following the trajectory.
 
         Returns False if no collision-free path exists.
         """
-        # Already at the target: nothing to plan or follow (the graph planner
-        # finds no path for a zero-length problem). Happens whenever a cycle
-        # starts with the arm resting at home.
-        if np.max(np.abs(self._current_arm_configuration() - target)) < self._arm_tolerance:
-            return True
-        self._world_binding.synchronize_transforms()
-        path = self._planner.plan_to_cspace_target(self._current_arm_configuration(), target)
-        return self._follow_path(path, current_time)
+        generator = OptimizedTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
+        generator.set_mode(TargetSpace.JOINTSPACE)
+        trajectory = generator.generate_trajectory(target, current_time)
 
+        if trajectory is None or not self._starts_at_current_configuration(trajectory):
+            self._is_moving = False
+            return False
+
+        return self._follow_trajectory(trajectory, current_time)
+    
     def set_linear_pose_target(self, position: np.ndarray, orientation: np.ndarray, current_time: float) -> bool:
         """Move the tool in a straight task-space line to a world-frame pose.
 
@@ -128,36 +134,16 @@ class RobotArm:
         Returns False if the conversion fails or does not start at the
         current configuration.
         """
-        current = self._current_arm_configuration().astype(np.float64)
-        tool_frame = self._cumotion_robot.robot_description.tool_frame_names()[0]
-        initial_pose = self._cumotion_robot.kinematics.pose(current, tool_frame)
+        target = np.concatenate((position, orientation))
+        trajectory = LinearTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance).generate_trajectory(target, current_time)
 
-        position_world_to_base, orientation_world_to_base = (
-            self._world_binding.get_world_interface().get_world_to_robot_base_transform()
-        )
-        target_pose = isaac_sim_to_cumotion_pose(
-            position_world_to_target=position,
-            orientation_world_to_target=orientation,
-            position_world_to_base=position_world_to_base,
-            orientation_world_to_base=orientation_world_to_base,
-        )
-
-        path_spec = cumotion.create_task_space_path_spec(initial_pose)
-        path_spec.add_linear_path(target_pose)
-        # Seed the IK on the measured configuration so the conversion stays on
-        # the arm's current branch instead of jumping to another solution.
-        ik_config = cumotion.IkConfig()
-        ik_config.cspace_seeds = [current]
-        trajectory = self._trajectory_generator.generate_trajectory_from_path_specification(
-            path_spec, inverse_kinematics_config=ik_config
-        )
         if trajectory is None or not self._starts_at_current_configuration(trajectory):
             self._is_moving = False
             return False
-        self._follow_trajectory(trajectory, current_time)
-        return True
 
-    def _starts_at_current_configuration(self, trajectory) -> bool:
+        return self._follow_trajectory(trajectory, current_time)
+
+    def _starts_at_current_configuration(self, trajectory: Trajectory) -> bool:
         # The IK conversion may reach the start pose on a different solution
         # branch; following such a trajectory would make the arm jump to it.
         start = trajectory.get_target_state(0.0)
@@ -170,7 +156,7 @@ class RobotArm:
         arm_indices = [self._articulation.dof_names.index(j) for j in self._cumotion_robot.controlled_joint_names]
         return self._articulation.get_dof_positions().numpy().flatten()[arm_indices]
 
-    def _follow_path(self, path, current_time: float) -> bool:
+    def _create_trajectory_for(self, path, current_time: float) -> Trajectory:
         if path is None:
             self._is_moving = False
             return False
@@ -181,10 +167,10 @@ class RobotArm:
             robot_joint_space=self._articulation.dof_names,
             active_joints=self._cumotion_robot.controlled_joint_names,
         )
-        self._follow_trajectory(trajectory, current_time)
-        return True
 
-    def _follow_trajectory(self, trajectory, current_time: float) -> None:
+        return trajectory
+    
+    def _follow_trajectory(self, trajectory: Trajectory, current_time: float) -> None:
         self._trajectory_follower.set_trajectory(trajectory)
         self._final_state = trajectory.get_target_state(trajectory.duration)
         joint_state = JointState.from_name(
