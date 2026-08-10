@@ -2,15 +2,16 @@
 Minimal Isaac Sim 6.0 kitchen scene.
 
 Run headlessly:
-    ./python.sh assets/simulation/kitchen_scene.py
+    ./python.sh simulation/kitchen_scene.py
 
 The scene loads the authored static environment (assets/scene/KitchenSceneUr.usd
 — light, floor, cooking table, robot support and the UR10 arm with its suction
 cup, the asset's Long_Suction gripper variant) and then references the movable
 ingredients: the hamburger on the left of the table and the case on the right.
 The isaacsim.ros2.bridge extension is enabled so the scene subscribes to
-/kinematic_kitchen/prepare_order (std_msgs/String, payload: order ID).  On each
-message the arm executes a pick-and-place cycle representing order preparation.
+/kinematic_kitchen/prepare_order (kinematic_kitchen_interfaces/PrepareOrder,
+carrying the order ID and its items).  On each message the arm executes a
+pick-and-place cycle representing order preparation.
 """
 
 from pathlib import Path
@@ -31,7 +32,8 @@ from isaacsim.core.simulation_manager import SimulationManager
 from isaacsim.robot_motion.cumotion import load_cumotion_supported_robot
 
 import rclpy
-from simulation.prepare_order_subscriber import PrepareOrderSubscriber
+from kinematic_kitchen_interfaces.msg import PrepareOrder
+from simulation.prepare_order_subscriber import RosMotionCommandSubscriber
 from simulation.robot_arm import RobotArm
 from simulation.pick_and_place import PickAndPlace
 from isaacsim.core.experimental.prims import XformPrim
@@ -132,12 +134,12 @@ articulation.set_dof_position_targets(HOME)
 simulation_app.update()
 
 rclpy.init()
-order_subscriber = PrepareOrderSubscriber()
+order_subscriber = RosMotionCommandSubscriber()
 
 # ---------------------------------------------------------------------------------
 # Simulation loop
 # ---------------------------------------------------------------------------------
-_active_order: str | None = None
+_active_order: PrepareOrder | None = None
 
 robot_arm = RobotArm(articulation, cumotion_robot, robot_prim_path, gripper_prim_path, robot_max_velocities, robot_max_accelerations, arm_tolerance)
 pick_and_place = PickAndPlace(robot_arm, HOME, PRE_PICK, PICK, PLACE, DROP, drop_dwell=DROP_DWELL_SECONDS)
@@ -148,13 +150,11 @@ while simulation_app.is_running():
 
     if _active_order is None and order_subscriber.has_next():
         _active_order = order_subscriber.next()
-        order_subscriber.get_logger().info(f"Starting pick and place for order {_active_order}")
         pick_and_place.start()
 
     pick_and_place.update(SimulationManager.get_simulation_time())
 
     if _active_order is not None and pick_and_place.is_idle():
-        order_subscriber.get_logger().info(f"Order {_active_order} completed")
         _active_order = None
 
 order_subscriber.destroy_node()
