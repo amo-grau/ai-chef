@@ -14,17 +14,24 @@ class RosMotionCommandSubscriber(Node):
             self._on_prepare_order,
             QUEUE_DEPTH
         )
+        self._active_order = None
 
+    def has_active_order(self):
+        return self._active_order != None
+
+    def on_active_order_handeled(self):
+        self._active_order = None
+    
     def has_next(self) -> bool:
         return len(self._pending_commands) > 0
 
-    def next(self) -> PrepareOrder:
-        order = self._pending_commands.pop(0)
+    def next(self):
+        prepareOrder = self._pending_commands.pop(0)
         self.get_logger().info(
-            f"Starting pick and place for order {order.id}: {', '.join(order.items)}"
+            f"Starting pick and place for order {prepareOrder.id}: {', '.join(prepareOrder.items)}"
         )
 
-        return order
+        self._active_order = prepareOrder
 
     def _on_prepare_order(self, msg: PrepareOrder) -> None:
         self.get_logger().info(f"Preparing order: {msg.id}, with {msg.items}")

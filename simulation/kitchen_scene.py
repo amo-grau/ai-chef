@@ -32,8 +32,8 @@ from isaacsim.core.simulation_manager import SimulationManager
 from isaacsim.robot_motion.cumotion import load_cumotion_supported_robot
 
 import rclpy
-from kinematic_kitchen_interfaces.msg import PrepareOrder
-from simulation.prepare_order_subscriber import RosMotionCommandSubscriber
+
+from simulation.for_handling_requests.prepare_order_subscriber import RosMotionCommandSubscriber
 from simulation.robot_arm import RobotArm
 from simulation.pick_and_place import PickAndPlace
 from isaacsim.core.experimental.prims import XformPrim
@@ -139,8 +139,6 @@ order_subscriber = RosMotionCommandSubscriber()
 # ---------------------------------------------------------------------------------
 # Simulation loop
 # ---------------------------------------------------------------------------------
-_active_order: PrepareOrder | None = None
-
 robot_arm = RobotArm(articulation, cumotion_robot, robot_prim_path, gripper_prim_path, robot_max_velocities, robot_max_accelerations, arm_tolerance)
 pick_and_place = PickAndPlace(robot_arm, HOME, PRE_PICK, PICK, PLACE, DROP, drop_dwell=DROP_DWELL_SECONDS)
 
@@ -148,14 +146,14 @@ while simulation_app.is_running():
     rclpy.spin_once(order_subscriber, timeout_sec=0.0)
     simulation_app.update()
 
-    if _active_order is None and order_subscriber.has_next():
-        _active_order = order_subscriber.next()
+    if order_subscriber.has_active_order() and order_subscriber.has_next():
+        order_subscriber.next()
         pick_and_place.start()
 
     pick_and_place.update(SimulationManager.get_simulation_time())
 
-    if _active_order is not None and pick_and_place.is_idle():
-        _active_order = None
+    if order_subscriber.has_active_order() is not None and pick_and_place.is_idle():
+        order_subscriber.on_active_order_handeled()
 
 order_subscriber.destroy_node()
 rclpy.shutdown()
