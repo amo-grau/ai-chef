@@ -49,96 +49,86 @@ SCENE_DIR = Path(__file__).resolve().parent.parent / "scene"
 KITCHEN_SCENE_USD = str(SCENE_DIR / "KitchenSceneUr.usd")
 HAMBURGER_USD = str(SCENE_DIR / "hamburguer" / "Hamburguer.usd")
 CASE_USD = str(SCENE_DIR / "hamburguer" / "SplitCase.usd")
-HAMBURGER_POSITION = (0.5, 0.4, 0.7)  # left side of the table
-CASE_POSITION = (0.5, -0.4, 0.8)  # right side of the table
-CASE_ORIENTATION = (0, 0, 180)
+
+# OBJECT  WORLD FRAMES AND DIMENSIONS
+OBSERVING_CAMERA_POSITION = [3.5, 0.0, 1.5]
+CAMERA_TARGET = [0.0, 0.0, 0.7]
 TABLE_POSITION = (0.85, 0, 0)
-# Small backstop propping up the open lid: since the mesh trim no longer
-# reaches the table, nothing stops the lid from swinging past its intended
-# open angle. Sits at table height, same material as the table top.
-# POSITION IS APPROXIMATE — nudge x/y in the GUI once you can see which way
-# the lid actually swings open; it needs to be directly under where the lid's
-# open edge comes to rest.
+ObjectsDropHeight = 0.75
+ObjectsFrontDistanceToRobot = 0.5
+ObjectsSideDistanceToRobot = 0.4
+HAMBURGER_POSITION = (ObjectsFrontDistanceToRobot, ObjectsSideDistanceToRobot, ObjectsDropHeight)  # left side of the table
+CASE_POSITION = (ObjectsFrontDistanceToRobot, -ObjectsSideDistanceToRobot, ObjectsDropHeight)  # right side of the table
+CASE_ORIENTATION = (0, 0, 180)
 CASE_SUPPORT_SIZE = (0.1, 0.07, 0.03)  # width, depth, height (m)
-CASE_SUPPORT_POSITION = (0.5, -0.5, 0.65 + CASE_SUPPORT_SIZE[2] / 2)
+CASE_SUPPORT_POSITION = (ObjectsFrontDistanceToRobot, -(ObjectsSideDistanceToRobot + 0.1), ObjectsDropHeight - 0.05)
 
-_HOME = np.array([-1.57, -1.57, -1.57, -1.57, 1.57, 0.0])
+# ROBOT C-SPACE FRAMES
+HOME = np.array([-1.57, -1.57, -1.57, -1.57, 1.57, 0.0])
 
-# Pick-and-place waypoints as Cartesian poses of the planner's tool frame
-# (tool0, per the ur10 robot.xrdf) in the world frame: (position [x, y, z],
-# orientation quaternion [w, x, y, z]). The suction cup tip sits 0.22 m past
-# tool0 along its +z, so with the tool pointing down each waypoint is the
-# intended cup-tip height plus that offset. The cup-tip z heights are
-# APPROXIMATE (table top at z ≈ 0.65) — tune against the live scene.
-# The suction cup points straight down at every waypoint. The yaw (rotation
-# about the vertical) is NOT arbitrary: the gripper's camera assembly sticks
-# out sideways, and with the opposite yaw (0, 1, 0, 0) it wedges against the
-# forearm as the elbow folds during the pick descent — the drives (56 N·m)
-# cannot push through the contact and the arm stalls short of the target.
-# This yaw keeps the camera on the far side (~11 cm of clearance).
-_DOWNWARDS = np.array([0.0, 0.0, 1.0, 0.0])
+# ROBOT TARGET-SPACE FRAMES
+DOWNWARDS_ORIENTATION = np.array([0.0, 0.0, 1.0, 0.0])
+HAMBUREGUER_THICKNESS = 0.01
+TABLE_HEIGHT = 0.8
+HAMBURGER_HEIGHT = TABLE_HEIGHT + HAMBUREGUER_THICKNESS
+TCP_Z_OFF = 0.08
+PRE_PICK_OFFSET = 0.1
+HAMBURGUER_DROP_HEIGHT = 0.06
+CASE_Y_OFFSET_FOR_HAMBURGER = 0.055
 
-_CUP_LENGTH = 0.12
+PRE_PICK = (np.array([HAMBURGER_POSITION[0], HAMBURGER_POSITION[1], HAMBURGER_HEIGHT + PRE_PICK_OFFSET + TCP_Z_OFF]), DOWNWARDS_ORIENTATION)
+PICK = (np.array([PRE_PICK[0][0], PRE_PICK[0][1], PRE_PICK[0][2] - PRE_PICK_OFFSET]), DOWNWARDS_ORIENTATION)
 
-_PRE_PICK = (np.array([0.5, 0.4, 0.95 + _CUP_LENGTH]), _DOWNWARDS)   # above the hamburger
-# Cup tip stops AT the hamburger's top surface (z ≈ 0.67): the pose must be
-# physically reachable, or the arm can never converge on it and the state
-# machine deadlocks in DRIVING_TO_PICK while the drives grind the cup
-# sideways against the burger. The suction's max grip distance (1 cm)
-# closes the remaining millimetres of gap.
-_PICK = (np.array([0.5, 0.4, 0.77 + _CUP_LENGTH]), _DOWNWARDS)       # down at the hamburger
-_PLACE = (np.array([0.5, -0.34, 0.95 + _CUP_LENGTH]), _DOWNWARDS)     # over the case
-# Lowered release point: from _PLACE the arm descends straight down to here
-# before opening, so the burger falls a short distance into the case instead
-# of dropping from the full approach height (case rim top at z ≈ 0.80).
-_DROP = (np.array([0.5, -0.34, 0.85 + _CUP_LENGTH]), _DOWNWARDS)
+PLACE = (np.array([CASE_POSITION[0], CASE_POSITION[1] + CASE_Y_OFFSET_FOR_HAMBURGER, TABLE_HEIGHT + PRE_PICK_OFFSET + HAMBURGUER_DROP_HEIGHT + TCP_Z_OFF]), DOWNWARDS_ORIENTATION)
+DROP = (np.array([PLACE[0][0], PLACE[0][1], PLACE[0][2] - PRE_PICK_OFFSET]), DOWNWARDS_ORIENTATION)
 
-# Hold the drop pose this long (simulation seconds) after releasing, so the
-# burger falls clear of the cup before the arm drives home.
-_DROP_DWELL = 1.0
+# TIME IN SECONDS
+DROP_DWELL_SECONDS = 1.0
 
+# PIRIM PATHS
+robot_name = "ur10"
+robot_prim_path = f"/World/{robot_name}"
+table_prim_path = "/World/CokingTable"
+hamburger_prim_path = "/World/Hamburger"
+case_prim_path = "/World/Case"
+case_support_path = "/World/CaseSupport"
+gripper_prim_path = f"{robot_prim_path}/ee_link/SurfaceGripper"
+
+# ROBOT CONFIGURATION
+robot_max_velocities = np.array([2.16, 2.16, 3.15, 3.2, 3.2, 3.2])
+robot_max_accelerations = np.array([4.0, 4.0, 4.0, 4.0, 4.0, 4.0])
+arm_tolerance = 0.02
 
 stage_utils.open_stage(KITCHEN_SCENE_USD)
 
-
-table = XformPrim("/World/CokingTable")
+table = XformPrim(table_prim_path)
 table.reset_xform_op_properties()
 table.set_world_poses(positions=[TABLE_POSITION])
 
-add_prop("/World/Hamburger", HAMBURGER_USD, HAMBURGER_POSITION, dynamic=True)
-# Not dynamic: CaseSplit.usdc already authors its own Base/Lid RigidBodyAPI,
-# collision, and the revolute joint between them. Applying add_prop's dynamic
-# sweep here would add a redundant RigidBodyAPI on this wrapper Xform, above
-# the already-rigid Base/Lid children — an invalid nested rigid body — and
-# overwrite their authored collision approximation with a hardcoded convexHull.
-add_prop("/World/Case", CASE_USD, CASE_POSITION, CASE_ORIENTATION)
-
+add_prop(hamburger_prim_path, HAMBURGER_USD, HAMBURGER_POSITION, dynamic=True)
+add_prop(case_prim_path, CASE_USD, CASE_POSITION, CASE_ORIENTATION)
 add_static_block(
-    "/World/CaseSupport",
+    case_support_path,
     CASE_SUPPORT_SIZE,
     CASE_SUPPORT_POSITION,
-    material_path="/World/CokingTable/Looks/Aluminum_Brushed",
+    material_path=f"{table_prim_path}/Looks/Aluminum_Brushed",
 )
 
-articulation = Articulation("/World/ur10")
+articulation = Articulation(robot_prim_path)
 
-cumotion_robot = load_cumotion_supported_robot("ur10")
+cumotion_robot = load_cumotion_supported_robot(robot_name)
 
-# Front view: camera on the +x side looking along -x at the table and robot.
 ViewportManager.set_camera_view(
     "/OmniverseKit_Persp",
-    eye=[3.5, 0.0, 1.5],
-    target=[0.0, 0.0, 0.7],
+    eye=OBSERVING_CAMERA_POSITION,
+    target=CAMERA_TARGET
 )
 
 app_utils.play()
 simulation_app.update()
 
-# The ur10 asset spawns with all joints at zero — the arm stretched
-# horizontally through the cooking table. Teleport it to the home
-# configuration so the first plan starts from a collision-free state.
-articulation.set_dof_positions(_HOME)
-articulation.set_dof_position_targets(_HOME)
+articulation.set_dof_positions(HOME)
+articulation.set_dof_position_targets(HOME)
 simulation_app.update()
 
 rclpy.init()
@@ -148,20 +138,9 @@ order_subscriber = PrepareOrderSubscriber()
 # Simulation loop
 # ---------------------------------------------------------------------------------
 _active_order: str | None = None
-robot_prim_path = "/World/ur10"
-# The suction cup ships in the ur10 asset's Long_Suction gripper variant;
-# grasping is done by suction because the hamburger is wider than a parallel
-# gripper's finger span (issue #31).
-gripper_prim_path = "/World/ur10/ee_link/SurfaceGripper"
-# Velocity limits from the cuMotion ur10 robot.urdf. Accelerations are kept
-# well below the xrdf's 12 rad/s² planning limit: at full limit the position
-# drives lag and overshoot at trajectory stops, which near the pick pose is
-# enough to ram the cup into the hamburger.
-robot_max_velocities = np.array([2.16, 2.16, 3.15, 3.2, 3.2, 3.2])
-robot_max_accelerations = np.array([4.0, 4.0, 4.0, 4.0, 4.0, 4.0])
-arm_tolerance = 0.02
+
 robot_arm = RobotArm(articulation, cumotion_robot, robot_prim_path, gripper_prim_path, robot_max_velocities, robot_max_accelerations, arm_tolerance)
-pick_and_place = PickAndPlace(robot_arm, _HOME, _PRE_PICK, _PICK, _PLACE, _DROP, drop_dwell=_DROP_DWELL)
+pick_and_place = PickAndPlace(robot_arm, HOME, PRE_PICK, PICK, PLACE, DROP, drop_dwell=DROP_DWELL_SECONDS)
 
 while simulation_app.is_running():
     rclpy.spin_once(order_subscriber, timeout_sec=0.0)
