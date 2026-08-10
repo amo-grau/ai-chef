@@ -1,4 +1,4 @@
-from assets.simulation.robot_arm import RobotArm
+from simulation.robot_arm import RobotArm
 import numpy as np
 from enum import Enum
 

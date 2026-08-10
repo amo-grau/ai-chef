@@ -25,15 +25,15 @@ import isaacsim.core.experimental.utils.app as app_utils
 import isaacsim.core.experimental.utils.stage as stage_utils
 from isaacsim.core.experimental.prims import Articulation
 from isaacsim.core.rendering_manager import ViewportManager
-from assets.simulation.stage_utils import add_prop, add_static_block
+from simulation.stage_utils import add_prop, add_static_block
 from isaacsim.core.simulation_manager import SimulationManager
 
 from isaacsim.robot_motion.cumotion import load_cumotion_supported_robot
 
 import rclpy
-from assets.simulation.prepare_order_subscriber import PrepareOrderSubscriber
-from assets.simulation.robot_arm import RobotArm
-from assets.simulation.pick_and_place import PickAndPlace
+from simulation.prepare_order_subscriber import PrepareOrderSubscriber
+from simulation.robot_arm import RobotArm
+from simulation.pick_and_place import PickAndPlace
 from isaacsim.core.experimental.prims import XformPrim
 
 # ---------------------------------------------------------------------------------
@@ -45,7 +45,7 @@ simulation_app.update()
 # ---------------------------------------------------------------------------------
 # Scene setup — load the authored static environment, then the ingredients
 # ---------------------------------------------------------------------------------
-SCENE_DIR = Path(__file__).resolve().parent.parent / "scene"
+SCENE_DIR = Path(__file__).resolve().parent.parent / "assets" / "scene"
 KITCHEN_SCENE_USD = str(SCENE_DIR / "KitchenSceneUr.usd")
 HAMBURGER_USD = str(SCENE_DIR / "hamburguer" / "Hamburguer.usd")
 CASE_USD = str(SCENE_DIR / "hamburguer" / "SplitCase.usd")
@@ -64,7 +64,7 @@ CASE_SUPPORT_SIZE = (0.1, 0.07, 0.03)  # width, depth, height (m)
 CASE_SUPPORT_POSITION = (ObjectsFrontDistanceToRobot, -(ObjectsSideDistanceToRobot + 0.1), ObjectsDropHeight - 0.05)
 
 # ROBOT C-SPACE FRAMES
-HOME = np.array([-1.57, -1.57, -1.57, -1.57, 1.57, 0.0])
+HOME = np.array([-1.57*2, -1.57, -1.57, -1.57, 1.57, 0.0])
 
 # ROBOT TARGET-SPACE FRAMES
 DOWNWARDS_ORIENTATION = np.array([0.0, 0.0, 1.0, 0.0])
