@@ -24,13 +24,11 @@ class TrajectoryType(Enum):
 class DriveCommand:
     def __init__(
             self,
-            gripper_action: GripperAction,
             target_position_array: List[float],
             target_position_space: TargetSpace,
             desired_trajectory: TrajectoryType
         ):
 
-        self._gripper_action = gripper_action
         self._target_position_array = target_position_array
         self._target_position_space = target_position_space
         self._desired_trajectory = desired_trajectory

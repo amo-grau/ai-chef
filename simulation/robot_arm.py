@@ -28,7 +28,7 @@ from isaacsim.robot_motion.cumotion import (
 )
 from isaacsim.robot_motion.cumotion.impl.utils import isaac_sim_to_cumotion_pose
 
-from drive_command import TargetSpace, OptimizedTrajectoryGenerator, LinearTrajectoryGenerator
+from drive_command import TargetSpace, OptimizedTrajectoryGenerator, LinearTrajectoryGenerator, SimplifiedTrajectoryGenerator
 
 class RobotArm:
     def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, robot_prim_path: str, gripper_prim_path: str, robot_max_velocities: np.ndarray, robot_max_accelerations: np.ndarray, arm_tolerance: float):
@@ -91,25 +91,29 @@ class RobotArm:
         self._final_state = None
         self._arm_tolerance = arm_tolerance
         self._is_opening = False
-        self._is_closing = False      
+        self._is_closing = False          
 
-    def set_pose_target(self, position: np.ndarray, orientation: np.ndarray, current_time: float) -> bool:
-        """Plan to a world-frame pose (task-space) and start following the trajectory.
 
-        orientation is a [w, x, y, z] quaternion; it is fully constrained.
-        Returns False if no collision-free path exists.
-        """        
-        target = np.concatenate((position, orientation))
-        generator = OptimizedTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
-        generator.set_mode(TargetSpace.CSPACE)
+    def _set_target(self, generator: SimplifiedTrajectoryGenerator, target: np.ndarray, current_time: float) -> float:
         trajectory = generator.generate_trajectory(target, current_time)
-
+        
         if trajectory is None or not self._starts_at_current_configuration(trajectory):
             self._is_moving = False
             return False
 
         return self._follow_trajectory(trajectory, current_time)
-    
+
+    def set_pose_target(self, target: np.ndarray, current_time: float) -> bool:
+        """Plan to a world-frame pose (task-space) and start following the trajectory.
+
+        orientation is a [w, x, y, z] quaternion; it is fully constrained.
+        Returns False if no collision-free path exists.
+        """
+        generator = OptimizedTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
+        generator.set_mode(TargetSpace.CSPACE)
+
+        return self._set_target(generator, target, current_time)
+
     def set_cspace_target(self, target: np.ndarray, current_time: float) -> bool:
         """Plan to a joint configuration (one per controlled arm joint) and start following the trajectory.
 
@@ -117,15 +121,11 @@ class RobotArm:
         """
         generator = OptimizedTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
         generator.set_mode(TargetSpace.JOINTSPACE)
-        trajectory = generator.generate_trajectory(target, current_time)
 
-        if trajectory is None or not self._starts_at_current_configuration(trajectory):
-            self._is_moving = False
-            return False
+        return self._set_target(generator, target, current_time)
 
-        return self._follow_trajectory(trajectory, current_time)
     
-    def set_linear_pose_target(self, position: np.ndarray, orientation: np.ndarray, current_time: float) -> bool:
+    def set_linear_pose_target(self, target: np.ndarray, current_time: float) -> bool:
         """Move the tool in a straight task-space line to a world-frame pose.
 
         Unlike set_pose_target this is NOT collision-checked, so it must only
@@ -134,14 +134,9 @@ class RobotArm:
         Returns False if the conversion fails or does not start at the
         current configuration.
         """
-        target = np.concatenate((position, orientation))
-        trajectory = LinearTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance).generate_trajectory(target, current_time)
+        generator = LinearTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
+        return self._set_target(generator, target, current_time)
 
-        if trajectory is None or not self._starts_at_current_configuration(trajectory):
-            self._is_moving = False
-            return False
-
-        return self._follow_trajectory(trajectory, current_time)
 
     def _starts_at_current_configuration(self, trajectory: Trajectory) -> bool:
         # The IK conversion may reach the start pose on a different solution

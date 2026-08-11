@@ -126,19 +126,19 @@ class PickAndPlace:
 
     def _drive_to(self, target: Pose, next_state: States, current_time: float):
         position, orientation = target
-        self._transition(self._arm.set_pose_target(position, orientation, current_time), next_state)
+        self._transition(self._arm.set_pose_target(np.concatenate((position, orientation)), current_time), next_state)
 
     def _drive_linear_to(self, target: Pose, next_state: States, current_time: float):
         """Drive straight to the target pose; the pick approach must not swing
         sideways through the hamburger, which the sampling-based planner is
         free to do."""
         position, orientation = target
-        moved = self._arm.set_linear_pose_target(position, orientation, current_time)
+        moved = self._arm.set_linear_pose_target(position, orientation, np.concatenate((position, orientation)), current_time)
         if not moved:
             # The linear conversion can fail (IK branch change, unreachable
             # segment); the collision-checked planner is the safe fallback.
             print(f"Linear motion unavailable for {next_state.name}; falling back to the planner")
-            moved = self._arm.set_pose_target(position, orientation, current_time)
+            moved = self._arm.set_pose_target(np.concatenate((position, orientation)), current_time)
         self._transition(moved, next_state)
 
     def _transition(self, plan_succeeded: bool, next_state: States):
