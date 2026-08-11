@@ -4,59 +4,24 @@ import numpy as np
 import isaacsim.core.experimental.utils.app as app_utils
 
 app_utils.enable_extension("isaacsim.robot.surface_gripper")
-from isaacsim.core.experimental.prims import Articulation, XformPrim
-from isaacsim.core.experimental.objects import Mesh
+from isaacsim.core.experimental.prims import Articulation
 from isaacsim.robot.surface_gripper import GripperView
 from isaacsim.robot.surface_gripper.bindings._surface_gripper import GripperStatus
 from isaacsim.robot_motion.experimental.motion_generation import (
-    SceneQuery,
-    TrackableApi,
-    ObstacleStrategy,
-    ObstacleConfiguration,
-    WorldBinding,
     TrajectoryFollower,
     JointState,
     RobotState,
     Trajectory
 )
 
-from isaacsim.robot_motion.cumotion import CumotionRobot, CumotionWorldInterface
-
-from drive_command import *
+from drive_command import TrajectoryFactory, DriveCommand
 
 class RobotArm:
-    def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, robot_prim_path: str, gripper_prim_path: str, robot_max_velocities: np.ndarray, robot_max_accelerations: np.ndarray, arm_tolerance: float):
+    def __init__(self, articulation: Articulation, trajectory_factory: TrajectoryFactory, gripper_prim_path: str, arm_tolerance: float):
         self._articulation = articulation
         self._suction = self._wrap_suction_gripper(gripper_prim_path)
-        obstacle_strategy = ObstacleStrategy()
-        obstacle_strategy.set_default_safety_tolerance(0.06)
-        obstacle_strategy.set_default_configuration(Mesh, ObstacleConfiguration("obb", 0.01))
-        scene_query = SceneQuery()
-        collision_objects = scene_query.get_prims_in_aabb(
-            search_box_origin=[0.0, 0.0, 0.0],
-            search_box_minimum=[-100.0, -100.0, -100.0],
-            search_box_maximum=[100.0, 100.0, 100.0],
-            tracked_api=TrackableApi.PHYSICS_COLLISION,
-            # The robot must not be a world obstacle for its own planner:
-            # cuMotion handles self-collision via its robot model. The
-            # hamburger is excluded so the planner lets the cup touch it.
-            exclude_prim_paths=[robot_prim_path, "/World/Hamburger"]
-        )
-        # WorldBinding queries local scales/poses on tracked prims and requires the
-        # standard translate/orient/scale op stack; this rewrite preserves world poses.
-        XformPrim(paths=collision_objects, reset_xform_op_properties=True)
-        world_interface = CumotionWorldInterface(visualize_debug_prims=False)
-        self._world_binding = WorldBinding(
-            world_interface=world_interface,
-            obstacle_strategy=obstacle_strategy,
-            tracked_prims=collision_objects,
-            tracked_collision_api=TrackableApi.PHYSICS_COLLISION
-        )
 
-        self._world_binding.initialize()
-        self._world_binding.get_world_interface().update_world_to_robot_root_transforms(articulation.get_world_poses())
-
-        self._trajectory_factory = TrajectoryFactory(self._articulation, cumotion_robot, self._world_binding, robot_max_velocities, robot_max_accelerations)
+        self._trajectory_factory = trajectory_factory
         self._trajectory_follower = TrajectoryFollower()
 
         self._is_moving = False
@@ -67,14 +32,24 @@ class RobotArm:
         self._is_opening = False
         self._is_closing = False          
 
-    def set_target(self, command: DriveCommand, current_time: float) -> float:
+    def set_target(self, command: DriveCommand, current_time: float):
         trajectory = self._trajectory_factory.create(command)
         
         if trajectory is None or not self._starts_at_current_configuration(trajectory):
             self._is_moving = False
             return False
 
-        return self._follow_trajectory(trajectory, current_time)
+        self._trajectory_follower.set_trajectory(trajectory)
+        self._final_state = trajectory.get_target_state(trajectory.duration)
+        joint_state = JointState.from_name(
+            robot_joint_space=self._articulation.dof_names,
+            positions=(self._articulation.dof_names, self._articulation.get_dof_positions()),
+            velocities=(self._articulation.dof_names, self._articulation.get_dof_velocities())
+        )
+
+        estimated_state = RobotState(joints=joint_state)
+        self._trajectory_follower.reset(estimated_state, None, current_time)
+        self._is_moving = True
 
     def _starts_at_current_configuration(self, trajectory: Trajectory) -> bool:
         # The IK conversion may reach the start pose on a different solution
@@ -84,18 +59,6 @@ class RobotArm:
         indices = start.joints.position_indices.numpy().flatten()
         current = self._articulation.get_dof_positions().numpy().flatten()[indices]
         return bool(np.max(np.abs(current - target)) < 0.1)
-    
-    def _follow_trajectory(self, trajectory: Trajectory, current_time: float) -> None:
-        self._trajectory_follower.set_trajectory(trajectory)
-        self._final_state = trajectory.get_target_state(trajectory.duration)
-        joint_state = JointState.from_name(
-            robot_joint_space=self._articulation.dof_names,
-            positions=(self._articulation.dof_names, self._articulation.get_dof_positions()),
-            velocities=(self._articulation.dof_names, self._articulation.get_dof_velocities())
-        )
-        estimated_state = RobotState(joints=joint_state)
-        self._trajectory_follower.reset(estimated_state, None, current_time)
-        self._is_moving = True
             
     def update(self, current_time: float):
         estimated_state = RobotState(

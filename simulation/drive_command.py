@@ -6,8 +6,15 @@ import cumotion
 
 from isaacsim.robot_motion.experimental.motion_generation import Trajectory, WorldBinding
 from isaacsim.robot_motion.cumotion import CumotionRobot, GraphBasedMotionPlanner, TrajectoryGenerator
-from isaacsim.core.experimental.prims import Articulation
 from isaacsim.robot_motion.cumotion.impl.utils import isaac_sim_to_cumotion_pose
+from isaacsim.robot_motion.experimental.motion_generation import (
+    SceneQuery,
+    TrackableApi,
+    ObstacleStrategy,
+    ObstacleConfiguration,
+    WorldBinding)
+from isaacsim.core.experimental.prims import Articulation, XformPrim
+from isaacsim.core.experimental.objects import Mesh
 
 class GripperAction(Enum):
     IDLE:0
@@ -128,12 +135,40 @@ class OptimizedTrajectoryGenerator(SimplifiedTrajectoryGenerator):
             return self._planner.plan_to_pose_target(self._current_arm_configuration(), target[0:3], target[4:])
 
 class TrajectoryFactory:
-    def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, world_binding: WorldBinding, max_velocities, max_accelerations):
+    def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, max_velocities, max_accelerations, robot_prim_path: str):
         self._articulation = articulation
         self._cumotion_robot = cumotion_robot
-        self._world_binding = world_binding
         self._max_velocities = max_velocities
         self._max_accelerations = max_accelerations
+
+        obstacle_strategy = ObstacleStrategy()
+        obstacle_strategy.set_default_safety_tolerance(0.06)
+        obstacle_strategy.set_default_configuration(Mesh, ObstacleConfiguration("obb", 0.01))
+        scene_query = SceneQuery()
+        collision_objects = scene_query.get_prims_in_aabb(
+            search_box_origin=[0.0, 0.0, 0.0],
+            search_box_minimum=[-100.0, -100.0, -100.0],
+            search_box_maximum=[100.0, 100.0, 100.0],
+            tracked_api=TrackableApi.PHYSICS_COLLISION,
+            # The robot must not be a world obstacle for its own planner:
+            # cuMotion handles self-collision via its robot model. The
+            # hamburger is excluded so the planner lets the cup touch it.
+            exclude_prim_paths=[robot_prim_path, "/World/Hamburger"]
+        )
+        # WorldBinding queries local scales/poses on tracked prims and requires the
+        # standard translate/orient/scale op stack; this rewrite preserves world poses.
+        XformPrim(paths=collision_objects, reset_xform_op_properties=True)
+        world_interface = CumotionWorldInterface(visualize_debug_prims=False)
+        self._world_binding = WorldBinding(
+            world_interface=world_interface,
+            obstacle_strategy=obstacle_strategy,
+            tracked_prims=collision_objects,
+            tracked_collision_api=TrackableApi.PHYSICS_COLLISION
+        )
+
+        self._world_binding.initialize()
+        self._world_binding.get_world_interface().update_world_to_robot_root_transforms(articulation.get_world_poses())
+
         
     def create(self, command: DriveCommand) -> Trajectory:
         generator = self._create_generator(command)

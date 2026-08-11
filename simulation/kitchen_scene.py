@@ -135,11 +135,13 @@ simulation_app.update()
 
 rclpy.init()
 order_subscriber = RosMotionCommandSubscriber()
+from drive_command import *
 
 # ---------------------------------------------------------------------------------
 # Simulation loop
 # ---------------------------------------------------------------------------------
-robot_arm = RobotArm(articulation, cumotion_robot, robot_prim_path, gripper_prim_path, robot_max_velocities, robot_max_accelerations, arm_tolerance)
+trajectory_factory = TrajectoryFactory(articulation, cumotion_robot, robot_max_velocities, robot_max_accelerations, robot_prim_path)
+robot_arm = RobotArm(articulation, trajectory_factory, gripper_prim_path, arm_tolerance)
 pick_and_place = PickAndPlace(robot_arm, HOME, PRE_PICK, PICK, PLACE, DROP, drop_dwell=DROP_DWELL_SECONDS)
 
 while simulation_app.is_running():
