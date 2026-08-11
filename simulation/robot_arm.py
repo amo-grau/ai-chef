@@ -20,19 +20,13 @@ from isaacsim.robot_motion.experimental.motion_generation import (
     Trajectory
 )
 
-from isaacsim.robot_motion.cumotion import (
-    CumotionRobot,
-    CumotionWorldInterface,
-    GraphBasedMotionPlanner,
-    TrajectoryGenerator
-)
+from isaacsim.robot_motion.cumotion import CumotionRobot, CumotionWorldInterface
 
 from drive_command import *
 
 class RobotArm:
     def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, robot_prim_path: str, gripper_prim_path: str, robot_max_velocities: np.ndarray, robot_max_accelerations: np.ndarray, arm_tolerance: float):
         self._articulation = articulation
-        self._cumotion_robot = cumotion_robot
         self._suction = self._wrap_suction_gripper(gripper_prim_path)
         obstacle_strategy = ObstacleStrategy()
         obstacle_strategy.set_default_safety_tolerance(0.06)
@@ -59,31 +53,12 @@ class RobotArm:
             tracked_collision_api=TrackableApi.PHYSICS_COLLISION
         )
 
-
         self._world_binding.initialize()
         self._world_binding.get_world_interface().update_world_to_robot_root_transforms(articulation.get_world_poses())
 
-        self._planner = GraphBasedMotionPlanner(
-            cumotion_robot=self._cumotion_robot,
-            cumotion_world_interface=self._world_binding.get_world_interface()
-        )
-        # Straight-line task-space motions (set_linear_pose_target). The
-        # generator is not collision-aware, so it is only suitable for short
-        # segments whose corridor is known to be free. Linear motions run at a
-        # fraction of the arm limits: at full speed the wrist drives lag their
-        # commands enough to tilt the tool tens of degrees mid-descent, which
-        # dips the gripper's protruding camera/pump hardware into the table
-        # and wedges the arm there (measured via PhysX contact reports).
-        self._trajectory_generator = TrajectoryGenerator(cumotion_robot, articulation.dof_names)
-        linear_speed_fraction = 0.25
-        cspace_trajectory_generator = self._trajectory_generator.get_cspace_trajectory_generator()
-        cspace_trajectory_generator.set_velocity_limits(linear_speed_fraction * robot_max_velocities.astype(np.float64))
-        cspace_trajectory_generator.set_acceleration_limits(linear_speed_fraction * robot_max_accelerations.astype(np.float64))
-        # Per-joint limits from the robot's cuMotion config (robot.urdf /
-        # robot.xrdf): the trajectory runs as fast as the hardware allows.
-        self._max_velocities = robot_max_velocities
-        self._max_accelerations = robot_max_accelerations
+        self._trajectory_factory = TrajectoryFactory(self._articulation, cumotion_robot, self._world_binding, robot_max_velocities, robot_max_accelerations)
         self._trajectory_follower = TrajectoryFollower()
+
         self._is_moving = False
         # Final state of the current trajectory; held as the drive target after
         # the trajectory clock expires, until the joints physically converge.
@@ -92,57 +67,14 @@ class RobotArm:
         self._is_opening = False
         self._is_closing = False          
 
-
-    def _set_target(self, command: DriveCommand, current_time: float) -> float:
-        generator = self.create_generator(command)
-
-        trajectory = generator.generate_trajectory(command.target_position_array, current_time)
+    def set_target(self, command: DriveCommand, current_time: float) -> float:
+        trajectory = self._trajectory_factory.create(command)
         
         if trajectory is None or not self._starts_at_current_configuration(trajectory):
             self._is_moving = False
             return False
 
         return self._follow_trajectory(trajectory, current_time)
-
-    def create_generator(self, command: DriveCommand) -> SimplifiedTrajectoryGenerator:
-        if (command.desired_trajectory == TrajectoryType.OPTIMIZED):
-            generator = OptimizedTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
-            generator.set_mode(command.target_position_space)
-            return generator
-        
-        if (command.target_position_space == TargetSpace.TASKSPACE and command.desired_trajectory.LINEAR):
-            return LinearTrajectoryGenerator(self._articulation, self._cumotion_robot, self._world_binding, self._arm_tolerance)
-        
-        raise NotImplementedError("TrajectoryGenerator implemented for given command.")
-
-    def set_pose_target(self, target: np.ndarray, current_time: float) -> bool:
-        """Plan to a world-frame pose (task-space) and start following the trajectory.
-
-        orientation is a [w, x, y, z] quaternion; it is fully constrained.
-        Returns False if no collision-free path exists.
-        """
-        command = DriveCommand(target, TargetSpace.TASKSPACE, TrajectoryType.OPTIMIZED)
-        return self._set_target(command, current_time)
-
-    def set_cspace_target(self, target: np.ndarray, current_time: float) -> bool:
-        """Plan to a joint configuration (one per controlled arm joint) and start following the trajectory.
-
-        Returns False if no collision-free path exists.
-        """
-        command = DriveCommand(target, TargetSpace.CSPACE, TrajectoryType.OPTIMIZED)
-        return self._set_target(command, current_time)
-    
-    def set_linear_pose_target(self, target: np.ndarray, current_time: float) -> bool:
-        """Move the tool in a straight task-space line to a world-frame pose.
-
-        Unlike set_pose_target this is NOT collision-checked, so it must only
-        be used for short segments whose corridor is known to be free (e.g.
-        the vertical pick approach). orientation is a [w, x, y, z] quaternion.
-        Returns False if the conversion fails or does not start at the
-        current configuration.
-        """
-        command = DriveCommand(target, TargetSpace.TASKSPACE, TrajectoryType.LINEAR)
-        return self._set_target(command, current_time)
 
     def _starts_at_current_configuration(self, trajectory: Trajectory) -> bool:
         # The IK conversion may reach the start pose on a different solution
