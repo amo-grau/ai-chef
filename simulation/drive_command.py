@@ -15,7 +15,7 @@ class GripperAction(Enum):
 
 class TargetSpace(Enum):
     CSPACE: 0
-    JOINTSPACE: 1
+    TASKSPACE: 1
 
 class TrajectoryType(Enum):
     LINEAR: 0
@@ -29,9 +29,9 @@ class DriveCommand:
             desired_trajectory: TrajectoryType
         ):
 
-        self._target_position_array = target_position_array
-        self._target_position_space = target_position_space
-        self._desired_trajectory = desired_trajectory
+        self.target_position_array = target_position_array
+        self.target_position_space = target_position_space
+        self.desired_trajectory = desired_trajectory
 
 
 
