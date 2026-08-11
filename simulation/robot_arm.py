@@ -23,88 +23,20 @@ class RobotArm:
 
         self._trajectory_factory = trajectory_factory
         self._trajectory_follower = TrajectoryFollower()
+        self._trajectory: Trajectory = None
 
-        self._is_moving = False
-        # Final state of the current trajectory; held as the drive target after
-        # the trajectory clock expires, until the joints physically converge.
-        self._final_state = None
         self._arm_tolerance = arm_tolerance
         self._is_opening = False
-        self._is_closing = False          
-
-    def set_target(self, command: DriveCommand, current_time: float):
-        trajectory = self._trajectory_factory.create(command)
-        
-        if trajectory is None or not self._starts_at_current_configuration(trajectory):
-            self._is_moving = False
-            return False
-
-        self._trajectory_follower.set_trajectory(trajectory)
-        self._final_state = trajectory.get_target_state(trajectory.duration)
-        joint_state = JointState.from_name(
-            robot_joint_space=self._articulation.dof_names,
-            positions=(self._articulation.dof_names, self._articulation.get_dof_positions()),
-            velocities=(self._articulation.dof_names, self._articulation.get_dof_velocities())
-        )
-
-        estimated_state = RobotState(joints=joint_state)
-        self._trajectory_follower.reset(estimated_state, None, current_time)
-        self._is_moving = True
-
-    def _starts_at_current_configuration(self, trajectory: Trajectory) -> bool:
-        # The IK conversion may reach the start pose on a different solution
-        # branch; following such a trajectory would make the arm jump to it.
-        start = trajectory.get_target_state(0.0)
-        target = start.joints.positions.numpy().flatten()
-        indices = start.joints.position_indices.numpy().flatten()
-        current = self._articulation.get_dof_positions().numpy().flatten()[indices]
-        return bool(np.max(np.abs(current - target)) < 0.1)
-            
-    def update(self, current_time: float):
-        estimated_state = RobotState(
-            joints = JointState.from_name(
-                robot_joint_space=self._articulation.dof_names,
-                positions=(self._articulation.dof_names, self._articulation.get_dof_positions()),
-                velocities=(self._articulation.dof_names, self._articulation.get_dof_velocities())
-            )
-        )
-
-        desired_state = self._trajectory_follower.forward(estimated_state, None, current_time)
-
-        if desired_state is not None and desired_state.joints.positions is not None:
-            self._articulation.set_dof_position_targets(
-                positions=desired_state.joints.positions,
-                dof_indices=desired_state.joints.position_indices
-            )
-            self._is_moving = True
-        elif self._is_moving and self._final_state is not None:
-            # The trajectory clock has expired, but the physical arm lags the
-            # commanded trajectory. Hold the final target and only report the
-            # motion finished once the joints have actually converged on it.
-            self._articulation.set_dof_position_targets(
-                positions=self._final_state.joints.positions,
-                dof_indices=self._final_state.joints.position_indices
-            )
-            self._is_moving = not self._arm_at_final_state()
-            if not self._is_moving:
-                self._final_state = None
-        else:
-            self._is_moving = False
-
-        if self._is_closing:
-            self._is_closing = not self._is_closed()
-        if self._is_opening:
-            self._is_opening = not self._is_opened()
-
-    def _arm_at_final_state(self) -> bool:
-        target = self._final_state.joints.positions.numpy().flatten()
-        indices = self._final_state.joints.position_indices.numpy().flatten()
-        current = self._articulation.get_dof_positions().numpy().flatten()[indices]
-        return bool(np.max(np.abs(current - target)) < self._arm_tolerance)
+        self._is_closing = False
 
     def is_active(self):
-        return self._is_moving or self._is_closing or self._is_opening
-    
+        return not self._arm_at_final_state() or self._is_closing or self._is_opening
+  
+    def set_target(self, command: DriveCommand, current_time: float):
+        self._trajectory = self._trajectory_factory.create(command)
+        self._trajectory_follower.set_trajectory(self._trajectory)
+        self._trajectory_follower.reset(self._estimated_state(), None, current_time)
+        
     def open(self):
         self._is_opening = True
         self._suction.apply_gripper_action([-1.0])
@@ -112,13 +44,52 @@ class RobotArm:
     def close(self):
         self._is_closing = True
         self._suction.apply_gripper_action([1.0])
+            
+    def update(self, current_time: float):
+        if not self._arm_at_final_state():
+            estimated_state = self._estimated_state()
+            desired_state = self._get_desired_state(current_time, estimated_state)
+
+            self._articulation.set_dof_position_targets(
+                positions=desired_state.joints.positions,
+                dof_indices=desired_state.joints.position_indices
+            )
+
+        if self._is_closing:
+            self._is_closing = not self._is_closed()
+
+        if self._is_opening:
+            self._is_opening = not self._is_opened()
+
+    def _get_desired_state(self, current_time, estimated_state):
+        if (current_time < self._trajectory.duration):
+            return self._trajectory_follower.forward(estimated_state, None, current_time)
+        else:
+            return self._trajectory_follower.forward(estimated_state, None, self._trajectory.duration)
+
+    def _estimated_state(self):
+        joint_state = JointState.from_name(
+            robot_joint_space=self._articulation.dof_names,
+            positions=(self._articulation.dof_names, self._articulation.get_dof_positions()),
+            velocities=(self._articulation.dof_names, self._articulation.get_dof_velocities())
+        )
+
+        return RobotState(joints=joint_state)
+    
+    def _arm_at_final_state(self) -> bool:
+        if self._trajectory == None:
+            return True
+        
+        final_state = self._trajectory.get_target_state(self._trajectory.duration)
+        target = final_state.joints.positions.numpy().flatten()
+        indices = final_state.joints.position_indices.numpy().flatten()
+        current = self._articulation.get_dof_positions().numpy().flatten()[indices]
+        return bool(np.max(np.abs(current - target)) < self._arm_tolerance)
 
     def _is_opened(self):
         return self._gripper_status() == GripperStatus.Open
 
     def _is_closed(self):
-        # Closed means the suction cup has actually attached an object; while
-        # commanded shut with nothing in range the status stays "Closing".
         return self._gripper_status() == GripperStatus.Closed
 
     def _gripper_status(self) -> GripperStatus:
