@@ -8,8 +8,8 @@ PIP := $(VENV)/bin/pip
 
 # Overridable locations for the live `run` target (Isaac Sim + ROS 2).
 ISAAC_SIM ?= $(HOME)/isaacsim
-ROS_SETUP ?= /opt/ros/jazzy/setup.bash
-SCENE := simulation/kitchen_scene.py
+ROS_SETUP ?= /opt/ros/lyrical/setup.bash
+SCENE := simulation/run_scene.sh
 TOPIC := /kinematic_kitchen/prepare_order
 ORDER ?= patty,bun,sauce
 
@@ -19,7 +19,16 @@ ORDER ?= patty,bun,sauce
 INTERFACES := simulation/interfaces
 OVERLAY_SETUP := install/setup.bash
 
-.PHONY: install interfaces lint lint-domain typecheck typecheck-domain test test-domain run docker-build docker-test
+# The scene runs on Isaac Sim's bundled Python 3.12 and its bundled Jazzy ROS 2,
+# which is a different distro and ABI from the system ROS 2. The same .msg
+# therefore has to be built twice: once for the system distro (the `interfaces`
+# target above, used by the CLI) and once for Jazzy/3.12 (this one, used by the
+# scene). The Jazzy build runs in a container so no second ROS 2 install is
+# needed on the host; the two builds interoperate over DDS.
+SIM_MSGS_IMAGE ?= ros:jazzy-ros-base
+SIM_INSTALL := install_jazzy
+
+.PHONY: install interfaces interfaces-sim lint lint-domain typecheck typecheck-domain test test-domain run docker-build docker-test
 
 # --system-site-packages lets the venv see apt-installed packages (numpy, yaml)
 # that ROS 2's rclpy depends on, so the Isaac Sim adapter tests can run locally
@@ -36,17 +45,25 @@ interfaces:
 		echo "ROS 2 setup not found at $(ROS_SETUP). Set ROS_SETUP=/path/to/setup.bash" >&2; exit 1; fi
 	@set -e; . "$(ROS_SETUP)"; colcon build --base-paths $(INTERFACES)
 
+interfaces-sim:
+	@if ! docker info >/dev/null 2>&1; then \
+		echo "Docker is required to build the simulator's messages (image: $(SIM_MSGS_IMAGE))." >&2; exit 1; fi
+	docker run --rm -u $$(id -u):$$(id -g) -v "$$(pwd)":/ws -w /ws $(SIM_MSGS_IMAGE) \
+		bash -c 'source /opt/ros/jazzy/setup.bash && \
+			colcon build --base-paths $(INTERFACES) \
+				--build-base build_jazzy --install-base $(SIM_INSTALL)'
+
 lint:
-	$(VENV)/bin/ruff check .
+	$(PYTHON) -m ruff check .
 
 lint-domain:
-	$(VENV)/bin/ruff check hexagon hexagon_tests
+	$(PYTHON) -m ruff check hexagon hexagon_tests
 
 typecheck:
-	$(VENV)/bin/mypy hexagon driven_adapters driving_adapters configuration
+	$(PYTHON) -m mypy hexagon driven_adapters driving_adapters configuration
 
 typecheck-domain:
-	$(VENV)/bin/mypy hexagon
+	$(PYTHON) -m mypy hexagon
 
 # Source ROS 2 and the interfaces overlay when they are present, so the adapter
 # integration tests actually run instead of skipping. Both are absent in CI and
@@ -55,10 +72,10 @@ test:
 	@set -e; \
 	if [ -f "$(ROS_SETUP)" ]; then . "$(ROS_SETUP)"; fi; \
 	if [ -f "$(OVERLAY_SETUP)" ]; then . "$(OVERLAY_SETUP)"; fi; \
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(VENV)/bin/pytest --tb=short || [ $$? -eq 5 ]
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PYTHON) -m pytest --tb=short || [ $$? -eq 5 ]
 
 test-domain:
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(VENV)/bin/pytest hexagon_tests/ --tb=short
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PYTHON) -m pytest hexagon_tests/ --tb=short
 
 # Launch the Isaac Sim scene and submit one order in a single command. The
 # scene takes 30-60s to load, so we wait for its subscriber to appear before
@@ -71,25 +88,22 @@ run:
 		echo "ROS 2 setup not found at $(ROS_SETUP). Set ROS_SETUP=/path/to/setup.bash" >&2; exit 1; fi
 	@if [ ! -f "$(OVERLAY_SETUP)" ]; then \
 		echo "Custom messages not built. Run: make interfaces" >&2; exit 1; fi
+	@if [ ! -d "$(SIM_INSTALL)" ]; then \
+		echo "Simulator messages not built. Run: make interfaces-sim" >&2; exit 1; fi
 	@set -e; \
-	. "$(ROS_SETUP)"; \
-	. "$(OVERLAY_SETUP)"; \
-	echo "Starting Isaac Sim scene (this can take 30-60s to load)..."; \
-	PYTHONPATH="$$(pwd):$$PYTHONPATH" "$(ISAAC_SIM)/python.sh" $(SCENE) & \
+	echo "Starting Isaac Sim scene (this can take 30-60s to load; the very"; \
+	echo "first run is far slower while shaders are compiled and cached)..."; \
+	ISAAC_SIM="$(ISAAC_SIM)" SIM_INSTALL="$(SIM_INSTALL)" $(SCENE) & \
 	SCENE_PID=$$!; \
 	trap 'kill $$SCENE_PID 2>/dev/null' EXIT; \
+	. "$(ROS_SETUP)"; \
+	. "$(OVERLAY_SETUP)"; \
+	CLI_PYTHON=$$([ -x "$(PYTHON)" ] && echo "$(PYTHON)" || echo python3); \
 	echo "Waiting for the scene to subscribe to $(TOPIC)..."; \
-	for i in $$(seq 1 120); do \
-		if ros2 topic info $(TOPIC) 2>/dev/null | grep -q 'Subscription count: [1-9]'; then \
-			READY=1; break; \
-		fi; \
-		if ! kill -0 $$SCENE_PID 2>/dev/null; then \
-			echo "Scene exited before becoming ready." >&2; exit 1; fi; \
-		sleep 1; \
-	done; \
-	if [ -z "$$READY" ]; then echo "Timed out waiting for the scene." >&2; exit 1; fi; \
+	PYTHONPATH="$$(pwd):$$PYTHONPATH" $$CLI_PYTHON simulation/wait_for_scene.py 180 || { \
+		echo "Timed out waiting for the scene." >&2; exit 1; }; \
 	echo "Scene ready. Submitting order: $(ORDER)"; \
-	$(VENV)/bin/python -m kinematic_kitchen submit "$(ORDER)"; \
+	PYTHONPATH="$$(pwd):$$PYTHONPATH" $$CLI_PYTHON -m kinematic_kitchen submit "$(ORDER)"; \
 	echo "Order submitted. Scene is running -- press Ctrl+C to stop."; \
 	wait $$SCENE_PID
 

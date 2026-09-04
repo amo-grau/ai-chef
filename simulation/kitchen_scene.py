@@ -14,9 +14,19 @@ carrying the order ID and its items).  On each message the arm executes a
 pick-and-place cycle representing order preparation.
 """
 
+import time
 from pathlib import Path
 
 from isaacsim.simulation_app import SimulationApp
+
+_SETUP_START = time.perf_counter()
+
+
+def log_step(message: str) -> None:
+    """Scene setup takes minutes on a cold shader/cuMotion cache, and most of
+    that time is spent inside single calls that print nothing. Reporting each
+    step keeps a slow start distinguishable from a hang."""
+    print(f"[scene {time.perf_counter() - _SETUP_START:6.1f}s] {message}", flush=True)
 
 simulation_app = SimulationApp({"headless": False})
 
@@ -33,6 +43,7 @@ from isaacsim.robot_motion.cumotion import load_cumotion_supported_robot
 
 import rclpy
 
+from simulation.drive_command import TrajectoryFactory
 from simulation.for_handling_requests.prepare_order_subscriber import RosMotionCommandSubscriber
 from simulation.robot_arm import RobotArm
 from simulation.pick_and_place import PickAndPlace
@@ -70,10 +81,17 @@ HOME = np.array([-1.57*2, -1.57, -1.57, -1.57, 1.57, 0.0])
 
 # ROBOT TARGET-SPACE FRAMES
 DOWNWARDS_ORIENTATION = np.array([0.0, 0.0, 1.0, 0.0])
-HAMBUREGUER_THICKNESS = 0.01
-TABLE_HEIGHT = 0.8
+# Measured from the authored scene: the cooking table's top surface sits at
+# z = 0.65, and the hamburger resting on it spans z = 0.65 -> 0.6652.
+HAMBUREGUER_THICKNESS = 0.0152
+TABLE_HEIGHT = 0.65
 HAMBURGER_HEIGHT = TABLE_HEIGHT + HAMBUREGUER_THICKNESS
-TCP_Z_OFF = 0.08
+# Distance from the frame cuMotion drives (ee_link) to the suction cup's
+# attachment point, which is where the gripper actually grabs: the asset
+# anchors suction_joint at localPos0 = (0.22, 0, 0) along ee_link's tool axis.
+# Waypoints are offset by this so the commanded pose puts the *cup* -- not the
+# wrist -- at the intended height.
+TCP_Z_OFF = 0.22
 PRE_PICK_OFFSET = 0.1
 HAMBURGUER_DROP_HEIGHT = 0.06
 CASE_Y_OFFSET_FOR_HAMBURGER = 0.055
@@ -101,12 +119,15 @@ robot_max_velocities = np.array([2.16, 2.16, 3.15, 3.2, 3.2, 3.2])
 robot_max_accelerations = np.array([4.0, 4.0, 4.0, 4.0, 4.0, 4.0])
 arm_tolerance = 0.02
 
+log_step("opening stage")
 stage_utils.open_stage(KITCHEN_SCENE_USD)
 
+log_step("placing table")
 table = XformPrim(table_prim_path)
 table.reset_xform_op_properties()
 table.set_world_poses(positions=[TABLE_POSITION])
 
+log_step("referencing ingredients")
 add_prop(hamburger_prim_path, HAMBURGER_USD, HAMBURGER_POSITION, dynamic=True)
 add_prop(case_prim_path, CASE_USD, CASE_POSITION, CASE_ORIENTATION)
 add_static_block(
@@ -116,8 +137,10 @@ add_static_block(
     material_path=f"{table_prim_path}/Looks/Aluminum_Brushed",
 )
 
+log_step("wrapping articulation")
 articulation = Articulation(robot_prim_path)
 
+log_step("loading cuMotion robot (slow on a cold cache)")
 cumotion_robot = load_cumotion_supported_robot(robot_name)
 
 ViewportManager.set_camera_view(
@@ -126,6 +149,7 @@ ViewportManager.set_camera_view(
     target=CAMERA_TARGET
 )
 
+log_step("starting the timeline")
 app_utils.play()
 simulation_app.update()
 
@@ -133,28 +157,31 @@ articulation.set_dof_positions(HOME)
 articulation.set_dof_position_targets(HOME)
 simulation_app.update()
 
+log_step("starting the ROS 2 node")
 rclpy.init()
 order_subscriber = RosMotionCommandSubscriber()
-from drive_command import *
 
 # ---------------------------------------------------------------------------------
 # Simulation loop
 # ---------------------------------------------------------------------------------
-trajectory_factory = TrajectoryFactory(articulation, cumotion_robot, robot_max_velocities, robot_max_accelerations, robot_prim_path)
+log_step("building the collision world (slow on a cold cache)")
+trajectory_factory = TrajectoryFactory(articulation, cumotion_robot, robot_max_velocities, robot_max_accelerations, robot_prim_path, arm_tolerance)
 robot_arm = RobotArm(articulation, trajectory_factory, gripper_prim_path, arm_tolerance)
 pick_and_place = PickAndPlace(robot_arm, HOME, PRE_PICK, PICK, PLACE, DROP, drop_dwell=DROP_DWELL_SECONDS)
+
+log_step("ready -- waiting for orders on /kinematic_kitchen/prepare_order")
 
 while simulation_app.is_running():
     rclpy.spin_once(order_subscriber, timeout_sec=0.0)
     simulation_app.update()
 
-    if order_subscriber.has_active_order() and order_subscriber.has_next():
+    if not order_subscriber.has_active_order() and order_subscriber.has_next():
         order_subscriber.next()
         pick_and_place.start()
 
     pick_and_place.update(SimulationManager.get_simulation_time())
 
-    if order_subscriber.has_active_order() is not None and pick_and_place.is_idle():
+    if order_subscriber.has_active_order() and pick_and_place.is_idle():
         order_subscriber.on_active_order_handeled()
 
 order_subscriber.destroy_node()

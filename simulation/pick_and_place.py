@@ -1,7 +1,7 @@
 from simulation.robot_arm import RobotArm
 import numpy as np
 from enum import Enum
-from drive_command import *
+from simulation.drive_command import DriveCommand, TargetSpace, TrajectoryType
 
 # A Cartesian waypoint: world-frame position [x, y, z] and orientation
 # quaternion [w, x, y, z].
@@ -48,6 +48,13 @@ class PickAndPlace:
         self._state = States.IDLE
         self._start_requested = False
 
+    def _set_state(self, state: States):
+        """Single place a state change happens, so the cycle can be followed
+        in the scene log while an order runs."""
+        if state != self._state:
+            print(f"[pick_and_place] {self._state.name} -> {state.name}", flush=True)
+        self._state = state
+
     def start(self):
         self._start_requested = True
 
@@ -85,7 +92,7 @@ class PickAndPlace:
             if current_time >= self._dwell_end_time:
                 self.home_to_finish(current_time)
         elif self._state == States.DRIVING_HOME_TO_FINISH:
-            self._state = States.IDLE
+            self._set_state(States.IDLE)
 
     def home_to_start(self, current_time: float):
         self._drive_home(States.DRIVING_HOME_TO_START, current_time)
@@ -99,7 +106,7 @@ class PickAndPlace:
 
     def close(self):
         self._arm.close()
-        self._state = States.CLOSING
+        self._set_state(States.CLOSING)
 
     def back_pre_pick(self, current_time: float):
         self._drive_linear_to(self._pre_pick, States.DRIVING_BACK_PRE_PICK, current_time)
@@ -112,12 +119,12 @@ class PickAndPlace:
 
     def open(self):
         self._arm.open()
-        self._state = States.OPENING
+        self._set_state(States.OPENING)
 
     def drop(self, current_time: float):
         """Hold still at the drop pose while the released item falls clear."""
         self._dwell_end_time = current_time + self._drop_dwell
-        self._state = States.DROPPING
+        self._set_state(States.DROPPING)
 
     def home_to_finish(self, current_time: float):
         self._drive_home(States.DRIVING_HOME_TO_FINISH, current_time)
@@ -138,7 +145,7 @@ class PickAndPlace:
         sideways through the hamburger, which the sampling-based planner is
         free to do."""
         position, orientation = target
-        command = DriveCommand(target, TargetSpace.TASKSPACE, TrajectoryType.LINEAR)
+        command = DriveCommand(np.concatenate((position, orientation)), TargetSpace.TASKSPACE, TrajectoryType.LINEAR)
         moved = self._arm.set_target(command, current_time)
         if not moved:
             # The linear conversion can fail (IK branch change, unreachable
@@ -150,7 +157,7 @@ class PickAndPlace:
 
     def _transition(self, plan_succeeded: bool, next_state: States):
         if plan_succeeded:
-            self._state = next_state
+            self._set_state(next_state)
         else:
             print(f"Pick and place aborted in {self._state.name}: no collision-free path")
-            self._state = States.IDLE
+            self._set_state(States.IDLE)

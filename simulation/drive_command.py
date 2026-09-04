@@ -24,18 +24,24 @@ from isaacsim.robot_motion.cumotion import (
 from isaacsim.robot_motion.cumotion.impl.utils import isaac_sim_to_cumotion_pose
 
 
+def arm_configuration(articulation: Articulation, cumotion_robot: CumotionRobot) -> np.ndarray:
+    """The measured positions of the joints cuMotion controls, in its joint order."""
+    arm_indices = [articulation.dof_names.index(j) for j in cumotion_robot.controlled_joint_names]
+    return articulation.get_dof_positions().numpy().flatten()[arm_indices]
+
+
 class GripperAction(Enum):
-    IDLE:0
-    GRIP:1
-    RELEASE:2
+    IDLE = 0
+    GRIP = 1
+    RELEASE = 2
 
 class TargetSpace(Enum):
-    CSPACE: 0
-    TASKSPACE: 1
+    CSPACE = 0
+    TASKSPACE = 1
 
 class TrajectoryType(Enum):
-    LINEAR: 0
-    OPTIMIZED: 1
+    LINEAR = 0
+    OPTIMIZED = 1
 
 class DriveCommand:
     def __init__(
@@ -61,8 +67,7 @@ class SimplifiedTrajectoryGenerator(ABC):
         pass
 
     def _current_arm_configuration(self):
-        arm_indices = [self._articulation.dof_names.index(j) for j in self._cumotion_robot.controlled_joint_names]
-        return self._articulation.get_dof_positions().numpy().flatten()[arm_indices]
+        return arm_configuration(self._articulation, self._cumotion_robot)
 
     def _starts_at_current_configuration(self, trajectory: Trajectory) -> bool:
         # The IK conversion may reach the start pose on a different solution
@@ -92,7 +97,7 @@ class LinearTrajectoryGenerator(SimplifiedTrajectoryGenerator):
         )
         target_pose = isaac_sim_to_cumotion_pose(
             position_world_to_target=target_position_array[0:3],
-            orientation_world_to_target=target_position_array[4:],
+            orientation_world_to_target=target_position_array[3:],
             position_world_to_base=position_world_to_base,
             orientation_world_to_base=orientation_world_to_base,
         )
@@ -103,9 +108,12 @@ class LinearTrajectoryGenerator(SimplifiedTrajectoryGenerator):
         # the arm's current branch instead of jumping to another solution.
         ik_config = cumotion.IkConfig()
         ik_config.cspace_seeds = [current]
-        return self._trajectory_generator.generate_trajectory_from_path_specification(
+        trajectory = self._trajectory_generator.generate_trajectory_from_path_specification(
             path_spec, inverse_kinematics_config=ik_config
-        )   
+        )
+        if trajectory is None or not self._starts_at_current_configuration(trajectory):
+            return None
+        return trajectory
 
 class OptimizedTrajectoryGenerator(SimplifiedTrajectoryGenerator):
     def __init__(self, articulation, cumotion_robot, world_binding, max_velocities, max_accelerations):
@@ -124,6 +132,8 @@ class OptimizedTrajectoryGenerator(SimplifiedTrajectoryGenerator):
         
         self._world_binding.synchronize_transforms()
         path = self._generate_path(target)
+        if path is None:
+            return None
 
         return path.to_minimal_time_joint_trajectory(
             max_velocities=self._max_velocities,
@@ -139,15 +149,16 @@ class OptimizedTrajectoryGenerator(SimplifiedTrajectoryGenerator):
         if (self._mode == TargetSpace.CSPACE):
             return self._planner.plan_to_cspace_target(self._current_arm_configuration(), target)
         
-        elif (self._mode == TargetSpace.JOINTSPACE):
-            return self._planner.plan_to_pose_target(self._current_arm_configuration(), target[0:3], target[4:])
+        elif (self._mode == TargetSpace.TASKSPACE):
+            return self._planner.plan_to_pose_target(self._current_arm_configuration(), target[0:3], target[3:])
 
 class TrajectoryFactory:
-    def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, max_velocities, max_accelerations, robot_prim_path: str):
+    def __init__(self, articulation: Articulation, cumotion_robot: CumotionRobot, max_velocities, max_accelerations, robot_prim_path: str, arm_tolerance: float):
         self._articulation = articulation
         self._cumotion_robot = cumotion_robot
         self._max_velocities = max_velocities
         self._max_accelerations = max_accelerations
+        self._arm_tolerance = arm_tolerance
 
         obstacle_strategy = ObstacleStrategy()
         obstacle_strategy.set_default_safety_tolerance(0.06)
@@ -178,7 +189,22 @@ class TrajectoryFactory:
         self._world_binding.get_world_interface().update_world_to_robot_root_transforms(articulation.get_world_poses())
 
         
-    def create(self, command: DriveCommand) -> Trajectory:
+    def requires_motion(self, command: DriveCommand) -> bool:
+        """Whether the arm has to move at all to satisfy the command.
+
+        The graph planner finds no path for a zero-length problem, so a c-space
+        command that the arm already satisfies -- every cycle starts with the
+        arm resting at home -- has to be recognised before planning.
+        """
+        if command.target_position_space != TargetSpace.CSPACE:
+            return True
+
+        current = arm_configuration(self._articulation, self._cumotion_robot)
+        target = np.array(command.target_position_array)
+        return bool(np.max(np.abs(current - target)) >= self._arm_tolerance)
+
+    def create(self, command: DriveCommand) -> Trajectory | None:
+        """Plan a trajectory for the command, or None if no plan exists."""
         generator = self._create_generator(command)
         return generator.generate_trajectory(command.target_position_array)
 

@@ -220,3 +220,7 @@ __marimo__/
 # colcon / ROS 2 build artifacts (build/ is already covered above)
 install/
 log/
+
+# colcon build for the simulator's bundled ROS 2 distro
+build_jazzy/
+install_jazzy/

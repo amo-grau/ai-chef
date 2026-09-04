@@ -20,6 +20,7 @@ class RosMotionCommandSubscriber(Node):
         return self._active_order != None
 
     def on_active_order_handeled(self):
+        self.get_logger().info(f"Order {self._active_order.id} completed")
         self._active_order = None
     
     def has_next(self) -> bool:
