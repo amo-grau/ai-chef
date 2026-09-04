@@ -1,11 +1,13 @@
 import time
-import rclpy
 
+import rclpy
+from kinematic_kitchen_interfaces.msg import PrepareOrder
 from rclpy.duration import Duration
 from rclpy.node import Node
-from std_msgs.msg import String
-from hexagon.order import Order
+
 from hexagon.driven_ports.for_preparing_orders import forPreparingOrders
+from hexagon.order import Order
+
 
 class forPreparingOrdersWithIsaacSim(forPreparingOrders):
     # Seconds to wait for the scene's subscriber to be discovered before
@@ -18,12 +20,13 @@ class forPreparingOrdersWithIsaacSim(forPreparingOrders):
             rclpy.init()
         self._node = Node("kinematic_kitchen_publisher")
         self._publisher = self._node.create_publisher(
-            String, "/kinematic_kitchen/prepare_order", 10
+            PrepareOrder, "/kinematic_kitchen/prepare_order", 10
         )
 
     def prepare(self, order: Order) -> None:
-        msg = String()
-        msg.data = order.id
+        msg = PrepareOrder()
+        msg.id = order.id
+        msg.items = order.items
 
         # The CLI is a short-lived process: it publishes once and exits. Wait
         # for the Isaac Sim scene's subscriber to be discovered first, otherwise

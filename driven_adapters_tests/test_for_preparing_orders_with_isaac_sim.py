@@ -3,12 +3,14 @@ import time
 import pytest
 
 # These are integration tests for the Isaac Sim adapter: they require a working
-# ROS 2 environment (rclpy). When ROS 2 is not available — e.g. in CI or the
-# Docker image — the whole module is skipped rather than failing.
+# ROS 2 environment (rclpy) and the colcon overlay that provides the project's
+# custom messages. When either is missing — e.g. in CI or the Docker image —
+# the whole module is skipped rather than failing.
 rclpy = pytest.importorskip("rclpy")
+pytest.importorskip("kinematic_kitchen_interfaces")
 
+from kinematic_kitchen_interfaces.msg import PrepareOrder
 from rclpy.node import Node
-from std_msgs.msg import String
 
 from driven_adapters.forPreparingOrders.for_preparing_orders_with_isaac_sim import (
     forPreparingOrdersWithIsaacSim,
@@ -26,15 +28,13 @@ def test_prepare_does_not_raise() -> None:
     adapter.prepare(order)
 
 
-def test_prepare_publishes_the_order_id() -> None:
-    received: list[str] = []
+def test_prepare_publishes_the_whole_order() -> None:
+    received: list[PrepareOrder] = []
     listener = Node("test_listener")
-    listener.create_subscription(
-        String, TOPIC, lambda msg: received.append(msg.data), 10
-    )
+    listener.create_subscription(PrepareOrder, TOPIC, received.append, 10)
 
     adapter: forPreparingOrders = forPreparingOrdersWithIsaacSim()
-    order = Order("order-1", ["burger"])
+    order = Order("order-1", ["patty", "bun", "sauce"])
 
     # Let the subscriber discover the adapter's publisher before publishing,
     # then publish and spin briefly to receive the message.
@@ -45,4 +45,6 @@ def test_prepare_publishes_the_order_id() -> None:
 
     listener.destroy_node()
 
-    assert "order-1" in received
+    assert received, "no message received before the timeout"
+    assert received[0].id == "order-1"
+    assert list(received[0].items) == ["patty", "bun", "sauce"]

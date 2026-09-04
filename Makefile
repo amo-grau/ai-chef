@@ -1,4 +1,4 @@
-# Recipes source ROS 2's setup.bash, which uses bash-only syntax, so run them
+# Recipes source simulation/ros_env.sh, which uses bash-only syntax, so run them
 # under bash rather than the default /bin/sh (dash).
 SHELL := /bin/bash
 
@@ -6,71 +6,96 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 
-# Overridable locations for the live `run` target (Isaac Sim + ROS 2).
+# Overridable locations for the live `run` target.
 ISAAC_SIM ?= $(HOME)/isaacsim
-ROS_SETUP ?= /opt/ros/jazzy/setup.bash
-SCENE := assets/simulation/kitchen_scene.py
+SCENE := simulation/run_scene.sh
+ROS_ENV := simulation/ros_env.sh
 TOPIC := /kinematic_kitchen/prepare_order
 ORDER ?= patty,bun,sauce
 
-.PHONY: install lint lint-domain typecheck typecheck-domain test test-domain run docker-build docker-test
+# The whole project speaks one ROS 2 distro: the Jazzy build Isaac Sim bundles,
+# on Isaac Sim's Python 3.12. Jazzy is itself a Python 3.12 distro, so the
+# generated PrepareOrder bindings are built once and used by the scene, the CLI
+# and the ROS-dependent tests alike. See simulation/ros_env.sh.
+INTERFACES := simulation/interfaces
+INTERFACES_IMAGE ?= ros:jazzy-ros-base
+INTERFACES_INSTALL := install_jazzy
 
-# --system-site-packages lets the venv see apt-installed packages (numpy, yaml)
-# that ROS 2's rclpy depends on, so the Isaac Sim adapter tests can run locally
-# when ROS 2 is sourced. CI never sources ROS 2 and runs domain tests only.
+.PHONY: install interfaces lint lint-domain typecheck typecheck-domain test test-domain run submit docker-build docker-test
+
+# --system-site-packages lets the venv see apt-installed dev tools. The venv is
+# for linting, typing and the domain tests only; anything that imports rclpy
+# runs on Isaac Sim's Python instead (see ROS_ENV).
 $(VENV):
 	python3 -m venv --system-site-packages $(VENV)
 
 install: $(VENV)
 	$(PIP) install -e ".[dev]" -q
 
+# Regenerate the custom message bindings. Re-run after editing any .msg file.
+# Built inside a Jazzy container so no ROS 2 install is needed on the host; the
+# result is loaded by Isaac Sim's Python 3.12, which is the same minor version.
+interfaces:
+	@if ! docker info >/dev/null 2>&1; then \
+		echo "Docker is required to build the messages (image: $(INTERFACES_IMAGE))." >&2; exit 1; fi
+	docker run --rm -u $$(id -u):$$(id -g) -v "$$(pwd)":/ws -w /ws $(INTERFACES_IMAGE) \
+		bash -c 'source /opt/ros/jazzy/setup.bash && \
+			colcon build --base-paths $(INTERFACES) \
+				--build-base build_jazzy --install-base $(INTERFACES_INSTALL)'
+
 lint:
-	$(VENV)/bin/ruff check .
+	$(PYTHON) -m ruff check .
 
 lint-domain:
-	$(VENV)/bin/ruff check hexagon hexagon_tests
+	$(PYTHON) -m ruff check hexagon hexagon_tests
 
 typecheck:
-	$(VENV)/bin/mypy hexagon driven_adapters driving_adapters configuration
+	$(PYTHON) -m mypy hexagon driven_adapters driving_adapters configuration
 
 typecheck-domain:
-	$(VENV)/bin/mypy hexagon
+	$(PYTHON) -m mypy hexagon
 
+# Run on Isaac Sim's Python when it is available, so the adapter integration
+# tests exercise rclpy instead of skipping; fall back to the venv otherwise.
+# CI and the Docker image have neither, and run the domain tests on their own.
 test:
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(VENV)/bin/pytest --tb=short || [ $$? -eq 5 ]
+	@set -e; \
+	if . $(ROS_ENV) 2>/dev/null; then \
+		echo "Running the full suite on Isaac Sim's Python ($$ROS_DISTRO)..."; \
+		PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 "$$KK_PYTHON" -m pytest --tb=short || [ $$? -eq 5 ]; \
+	else \
+		echo "ROS 2 environment unavailable; running domain tests only." >&2; \
+		PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PYTHON) -m pytest hexagon_tests/ --tb=short || [ $$? -eq 5 ]; \
+	fi
 
 test-domain:
-	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(VENV)/bin/pytest hexagon_tests/ --tb=short
+	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PYTHON) -m pytest hexagon_tests/ --tb=short
 
 # Launch the Isaac Sim scene and submit one order in a single command. The
 # scene takes 30-60s to load, so we wait for its subscriber to appear before
 # submitting -- otherwise the order would be published before anything is
 # listening and the arm would not move. Override ORDER=... to change the items.
 run:
-	@if [ ! -x "$(ISAAC_SIM)/python.sh" ]; then \
-		echo "Isaac Sim not found at $(ISAAC_SIM). Set ISAAC_SIM=/path/to/isaacsim" >&2; exit 1; fi
-	@if [ ! -f "$(ROS_SETUP)" ]; then \
-		echo "ROS 2 setup not found at $(ROS_SETUP). Set ROS_SETUP=/path/to/setup.bash" >&2; exit 1; fi
 	@set -e; \
-	. "$(ROS_SETUP)"; \
-	echo "Starting Isaac Sim scene (this can take 30-60s to load)..."; \
-	"$(ISAAC_SIM)/python.sh" $(SCENE) & \
+	. $(ROS_ENV); \
+	echo "Starting Isaac Sim scene (this can take 30-60s to load; the very"; \
+	echo "first run is far slower while shaders are compiled and cached)..."; \
+	$(SCENE) & \
 	SCENE_PID=$$!; \
 	trap 'kill $$SCENE_PID 2>/dev/null' EXIT; \
 	echo "Waiting for the scene to subscribe to $(TOPIC)..."; \
-	for i in $$(seq 1 120); do \
-		if ros2 topic info $(TOPIC) 2>/dev/null | grep -q 'Subscription count: [1-9]'; then \
-			READY=1; break; \
-		fi; \
-		if ! kill -0 $$SCENE_PID 2>/dev/null; then \
-			echo "Scene exited before becoming ready." >&2; exit 1; fi; \
-		sleep 1; \
-	done; \
-	if [ -z "$$READY" ]; then echo "Timed out waiting for the scene." >&2; exit 1; fi; \
+	"$$KK_PYTHON" simulation/wait_for_scene.py 180 || { \
+		echo "Timed out waiting for the scene." >&2; exit 1; }; \
 	echo "Scene ready. Submitting order: $(ORDER)"; \
-	$(VENV)/bin/python -m kinematic_kitchen submit "$(ORDER)"; \
+	"$$KK_PYTHON" -m kinematic_kitchen submit "$(ORDER)"; \
 	echo "Order submitted. Scene is running -- press Ctrl+C to stop."; \
 	wait $$SCENE_PID
+
+# Submit an order to an already-running scene. Override ORDER=... to change it.
+submit:
+	@set -e; \
+	. $(ROS_ENV); \
+	"$$KK_PYTHON" -m kinematic_kitchen submit "$(ORDER)"
 
 docker-build:
 	docker build -t kinematic-kitchen .
