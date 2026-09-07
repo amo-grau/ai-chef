@@ -1,0 +1,25 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: robot_description
+    relative_path: urdf/kitchen_scene.urdf.xacro
+  srdf:
+    relative_path: config/workcell.srdf
+  package_settings:
+    author_name: oscar amo grau
+    author_email: oscaramog@gmail.com
+    generated_timestamp: 1788804839
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
