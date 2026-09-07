@@ -1,0 +1,146 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="workcell">
+
+  <!--
+    1. INCLUDE THE ROBOT DESCRIPTION
+
+    The arm comes from the official Franka package.  The robot formerly sold as
+    "Panda" is called FER (Franka Emika Robot) upstream, so its model lives at
+    franka_description/robots/fer and its links and joints carry the "fer_"
+    prefix: fer_link0, fer_joint1, ...
+
+    We include robots/common/franka_robot.xacro rather than robots/fer/
+    fer.urdf.xacro, because that wrapper hardcodes connected_to="base" and
+    would inject a stray "base" link into the workcell.
+  -->
+  <xacro:include filename="$(find franka_description)/robots/common/franka_robot.xacro" />
+
+  <xacro:property name="robot_type" value="fer" />
+
+  <!--
+    LAYOUT
+
+    The pedestal and the arm stand at the world origin; the table sits in front
+    of them, offset along +Y.  Both the pedestal and the table hang directly off
+    "world" as siblings, so moving one never drags the other.
+
+    Every dimension below is a property, and the placements are derived from
+    them.  Keep it that way: writing a literal where a derived value belongs is
+    what previously left the arm hovering above its mount.
+  -->
+  <xacro:property name="support_radius" value="0.1" />
+  <xacro:property name="support_height" value="0.2" />
+
+  <xacro:property name="table_size_x" value="0.8" />
+  <xacro:property name="table_size_y" value="1.2" />
+  <xacro:property name="table_size_z" value="0.35" />
+
+  <!-- How far in front of the arm (+Y) the centre of the table sits. -->
+  <xacro:property name="table_front_offset" value="0.55" />
+
+  <!-- 2. DEFINE THE WORLD FRAME -->
+  <link name="world"/>
+
+  <!--
+    3. DEFINE THE TABLE
+
+    Geometry is centred in the link's own frame and sits on the floor, so the
+    link frame is the table's footprint centre.  Its placement in the workcell
+    lives in the world_to_table joint below, not baked into these origins.
+  -->
+  <link name="table">
+    <visual>
+      <origin xyz="0 0 ${table_size_z/2}" rpy="0 0 0"/>
+      <geometry>
+        <!-- Box dimensions: Size X, Size Y, Size Z -->
+        <box size="${table_size_x} ${table_size_y} ${table_size_z}"/>
+      </geometry>
+      <material name="dark_gray">
+        <color rgba="0.2 0.2 0.2 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${table_size_z/2}" rpy="0 0 0"/>
+      <geometry>
+        <box size="${table_size_x} ${table_size_y} ${table_size_z}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="50.0"/>
+      <origin xyz="0 0 ${table_size_z/2}" rpy="0 0 0"/>
+      <inertia ixx="3.33" ixy="0" ixz="0" iyy="6.67" iyz="0" izz="7.33"/>
+    </inertial>
+  </link>
+
+  <!-- Table stands on the floor, in front of the arm along +Y. -->
+  <joint name="world_to_table" type="fixed">
+    <parent link="world"/>
+    <child link="table"/>
+    <origin xyz="${table_front_offset} 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!--
+    4. DEFINE THE ROBOT SUPPORT MOUNT
+
+    A floor-standing pedestal the arm bolts onto.  Geometry is raised by half
+    its height so the cylinder rests on the floor: it spans z = 0 to
+    support_height in its own frame.
+  -->
+  <link name="robot_support">
+    <visual>
+      <origin xyz="0 0 ${support_height/2}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${support_radius}" length="${support_height}"/>
+      </geometry>
+      <material name="light_gray">
+        <color rgba="0.7 0.7 0.7 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${support_height/2}" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="${support_radius}" length="${support_height}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="10.0"/>
+      <origin xyz="0 0 ${support_height/2}" rpy="0 0 0"/>
+      <inertia ixx="0.05" ixy="0" ixz="0" iyy="0.05" iyz="0" izz="0.05"/>
+    </inertial>
+  </link>
+
+  <!-- Pedestal stands on the floor at the world origin, sibling of the table. -->
+  <joint name="world_to_support" type="fixed">
+    <parent link="world"/>
+    <child link="robot_support"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 5. INSTANTIATE AND ATTACH THE ARM -->
+  <!--
+    connected_to="" suppresses franka_robot's own base link and mount joint,
+    leaving fer_link0 free so we can bolt it onto the pedestal ourselves below.
+  -->
+  <xacro:franka_robot
+      robot_type="${robot_type}"
+      connected_to=""
+      arm_prefix=""
+      no_prefix="false"
+      hand="true"
+      ee_id="franka_hand"
+      with_sc="false"
+      ros2_control="false"
+      gazebo="false"
+      joint_limits="${xacro.load_yaml('$(find franka_description)/robots/' + robot_type + '/joint_limits.yaml')}"
+      inertials="${xacro.load_yaml('$(find franka_description)/robots/' + robot_type + '/inertials.yaml')}"
+      kinematics="${xacro.load_yaml('$(find franka_description)/robots/' + robot_type + '/kinematics.yaml')}"
+      dynamics="${xacro.load_yaml('$(find franka_description)/robots/' + robot_type + '/dynamics.yaml')}" />
+
+  <!-- Arm bolts onto the pedestal's top surface. -->
+  <joint name="${robot_type}_base_joint" type="fixed">
+    <parent link="robot_support" />
+    <child link="${robot_type}_link0" />
+    <origin xyz="0 0 ${support_height}" rpy="0 0 0" />
+  </joint>
+
+</robot>
